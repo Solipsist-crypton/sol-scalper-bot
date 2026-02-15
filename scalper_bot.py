@@ -1,4 +1,5 @@
 import telebot
+from telebot import types
 from kucoin.client import Market
 import pandas as pd
 import time
@@ -196,6 +197,8 @@ def stop_cmd(message):
     if hasattr(bot, 'scalper'):
         bot.scalper.running = False
         bot.reply_to(message, "⏹ Бот зупинено")
+    else:
+        bot.reply_to(message, "Бот не запущено")
 
 @bot.message_handler(commands=['price'])
 def price_cmd(message):
@@ -239,8 +242,95 @@ def history_cmd(message):
     else:
         bot.reply_to(message, "Історія порожня")
 
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    if hasattr(bot, 'scalper') and bot.scalper.trades_history:
+        # Статистика по кожній монеті
+        stats = {}
+        for trade in bot.scalper.trades_history:
+            symbol = trade['symbol']
+            if symbol not in stats:
+                stats[symbol] = {
+                    'trades': 0,
+                    'wins': 0,
+                    'losses': 0,
+                    'total_pnl': 0,
+                    'longs': 0,
+                    'shorts': 0
+                }
+            
+            stats[symbol]['trades'] += 1
+            stats[symbol]['total_pnl'] += trade['pnl']
+            
+            if trade['pnl'] > 0:
+                stats[symbol]['wins'] += 1
+            else:
+                stats[symbol]['losses'] += 1
+            
+            if trade['side'] == 'LONG':
+                stats[symbol]['longs'] += 1
+            else:
+                stats[symbol]['shorts'] += 1
+        
+        # Формуємо повідомлення
+        msg = "📊 *ЗАГАЛЬНА СТАТИСТИКА*\n\n"
+        
+        for symbol, data in stats.items():
+            winrate = (data['wins'] / data['trades'] * 100) if data['trades'] > 0 else 0
+            msg += (f"*{symbol}*\n"
+                   f"📈 Угод: {data['trades']}\n"
+                   f"✅ Прибуткових: {data['wins']}\n"
+                   f"❌ Збиткових: {data['losses']}\n"
+                   f"🎯 Вінрейт: {winrate:.1f}%\n"
+                   f"💰 Загальний PnL: {data['total_pnl']:+.2f}%\n"
+                   f"🟢 LONG: {data['longs']} | 🔴 SHORT: {data['shorts']}\n\n")
+        
+        # Загальний підсумок
+        total_trades = sum(d['trades'] for d in stats.values())
+        total_pnl = sum(d['total_pnl'] for d in stats.values())
+        msg += f"*ВСЬОГО*\n📊 Угод: {total_trades} | 💰 PnL: {total_pnl:+.2f}%"
+        
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Історія угод порожня")
+
+@bot.message_handler(commands=['menu'])
+def menu_cmd(message):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn1 = types.KeyboardButton('/price')
+    btn2 = types.KeyboardButton('/status')
+    btn3 = types.KeyboardButton('/history')
+    btn4 = types.KeyboardButton('/stats')
+    btn5 = types.KeyboardButton('/start')
+    btn6 = types.KeyboardButton('/stop')
+    btn7 = types.KeyboardButton('/menu')
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7)
+    
+    bot.send_message(message.chat.id, "📱 *Меню керування*\n\nВиберіть команду:", 
+                    reply_markup=markup, parse_mode='Markdown')
+
+# Обробка текстових команд з кнопок
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    text = message.text
+    if text == '/price':
+        price_cmd(message)
+    elif text == '/status':
+        status_cmd(message)
+    elif text == '/history':
+        history_cmd(message)
+    elif text == '/stats':
+        stats_cmd(message)
+    elif text == '/start':
+        start_cmd(message)
+    elif text == '/stop':
+        stop_cmd(message)
+    elif text == '/menu':
+        menu_cmd(message)
+
 if __name__ == '__main__':
     print("🤖 Telegram Scalper Bot (KuCoin) запущено...")
     print(f"Моніторинг пар: {config.SYMBOLS}")
     print(f"EMA {config.EMA_FAST}/{config.EMA_SLOW} на {config.INTERVAL}")
+    print("Команди: /menu - відкрити меню")
     bot.polling(none_stop=True)

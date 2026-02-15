@@ -21,8 +21,8 @@ class Position:
 
 class ScalperBot:
     def __init__(self):
-        self.positions = {}
-        self.last_signals = {}
+        self.positions = {}          # {symbol: Position}
+        self.last_state = {}          # {symbol: 'ABOVE'/'BELOW'}
         self.trades_history = []
         self.running = True
     
@@ -55,37 +55,51 @@ class ScalperBot:
             return None, None, None
     
     def check_crossover(self, symbol):
+        """Перевіряє перетин EMA для пари"""
         ema_fast, ema_slow, price = self.get_emas(symbol)
         if not ema_fast:
-            return None, None
+            return None, None, None
         
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         
-        if symbol not in self.last_signals:
-            self.last_signals[symbol] = current_state
-            print(f"📊 {symbol}: {current_state} (EMA12={ema_fast:.2f}, EMA26={ema_slow:.2f})")
-            return None, price
+        # Перший запуск - тільки запам'ятовуємо стан
+        if symbol not in self.last_state:
+            self.last_state[symbol] = current_state
+            print(f"📊 {symbol}: початковий стан {current_state}")
+            return None, None, price
         
-        if current_state != self.last_signals[symbol]:
-            signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
-            self.last_signals[symbol] = current_state
-            return signal, price
+        # ПЕРЕТИН! Стан змінився
+        if current_state != self.last_state[symbol]:
+            # Визначаємо сигнал
+            if current_state == 'ABOVE':
+                signal = 'LONG'
+            else:
+                signal = 'SHORT'
+            
+            # Запам'ятовуємо новий стан
+            self.last_state[symbol] = current_state
+            
+            return signal, current_state, price
         
-        return None, price
+        return None, None, price
     
     def close_position(self, symbol, exit_price, exit_time):
+        """Закриває позицію і рахує результат"""
         if symbol in self.positions:
             pos = self.positions[symbol]
             pos.exit_price = exit_price
             pos.exit_time = exit_time
             
+            # Рахуємо PnL у відсотках
             if pos.side == 'LONG':
                 pos.pnl_percent = ((exit_price - pos.entry_price) / pos.entry_price) * 100
-            else:
+            else:  # SHORT
                 pos.pnl_percent = ((pos.entry_price - exit_price) / pos.entry_price) * 100
             
+            # Рахуємо час утримання (в хвилинах)
             hold_minutes = (exit_time - pos.entry_time) / 60
             
+            # Додаємо в історію
             trade_info = {
                 'symbol': symbol,
                 'side': pos.side,
@@ -97,13 +111,21 @@ class ScalperBot:
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S')
             }
             self.trades_history.append(trade_info)
+            
+            # Відправляємо в Telegram
             self.send_trade_result(trade_info)
+            
+            # Видаляємо позицію
             del self.positions[symbol]
+            
             return trade_info
         return None
     
     def open_position(self, symbol, side, price, current_time):
+        """Відкриває нову позицію"""
         self.positions[symbol] = Position(symbol, side, price, current_time)
+        
+        # Сповіщення про відкриття
         msg = (f"🆓 *НОВА ПОЗИЦІЯ*\n"
                f"Монета: {symbol}\n"
                f"Напрямок: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
@@ -112,6 +134,7 @@ class ScalperBot:
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
     def send_trade_result(self, trade):
+        """Відправляє результат угоди"""
         emoji = '✅' if trade['pnl'] > 0 else '❌'
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
@@ -123,25 +146,46 @@ class ScalperBot:
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
     def monitor_loop(self):
-        last_daily_stats = time.time()
+        """Головний цикл моніторингу"""
+        print("🤖 Моніторинг запущено. Чекаємо на перетин EMA...")
+        
         while self.running:
             current_time = time.time()
+            
             for symbol in config.SYMBOLS:
                 try:
-                    signal, price = self.check_crossover(symbol)
+                    signal, state, price = self.check_crossover(symbol)
+                    
                     if signal:
+                        print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {price})")
+                        
+                        # Якщо є відкрита позиція для цієї пари - закриваємо
                         if symbol in self.positions:
-                            self.close_position(symbol, price, current_time)
-                        self.open_position(symbol, signal, price, current_time)
+                            current_pos = self.positions[symbol]
+                            
+                            # Закриваємо ТІЛЬКИ якщо сигнал протилежний
+                            if (current_pos.side == 'LONG' and signal == 'SHORT') or \
+                               (current_pos.side == 'SHORT' and signal == 'LONG'):
+                                self.close_position(symbol, price, current_time)
+                                
+                                # Відкриваємо нову позицію (протилежну)
+                                self.open_position(symbol, signal, price, current_time)
+                            else:
+                                print(f"⚠️ {symbol}: ігноруємо {signal} - вже є {current_pos.side}")
+                        
+                        else:
+                            # Немає позиції - відкриваємо нову
+                            self.open_position(symbol, signal, price, current_time)
+                    
                 except Exception as e:
-                    print(f"Помилка: {e}")
-            if current_time - last_daily_stats > 86400:
-                last_daily_stats = current_time
-            time.sleep(5)
+                    print(f"Помилка для {symbol}: {e}")
+            
+            time.sleep(5)  # Перевірка кожні 5 секунд
 
+# ===== КОМАНДИ TELEGRAM =====
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    bot.reply_to(message, "🚀 Бот запущено!")
+    bot.reply_to(message, "🚀 Бот запущено! Чекаємо на перетин EMA 12/26...")
     scalper = ScalperBot()
     thread = threading.Thread(target=scalper.monitor_loop, daemon=True)
     thread.start()
@@ -198,4 +242,5 @@ def history_cmd(message):
 if __name__ == '__main__':
     print("🤖 Telegram Scalper Bot (KuCoin) запущено...")
     print(f"Моніторинг пар: {config.SYMBOLS}")
+    print(f"EMA {config.EMA_FAST}/{config.EMA_SLOW} на {config.INTERVAL}")
     bot.polling(none_stop=True)

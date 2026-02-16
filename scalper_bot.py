@@ -27,6 +27,10 @@ class ScalperBot:
         self.last_state = {}
         self.trades_history = []
         self.running = True
+        # Захист від дублікатів
+        self.last_signal_time = {}  # {symbol: timestamp}
+        self.min_signal_interval = 30  # мінімум 30 секунд між сигналами
+        self.last_trade_time = {}  # {symbol: timestamp}
     
     def convert_symbol(self, symbol):
         return symbol.replace('USDT', '-USDT')
@@ -57,25 +61,42 @@ class ScalperBot:
             return None, None, None
     
     def check_crossover(self, symbol):
+        """Перевіряє перетин EMA з захистом від дублікатів"""
         ema_fast, ema_slow, price = self.get_emas(symbol)
         if not ema_fast:
             return None, None, None
         
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
+        current_time = time.time()
         
+        # Перший запуск - тільки запам'ятовуємо стан
         if symbol not in self.last_state:
             self.last_state[symbol] = current_state
-            print(f"📊 {symbol}: початковий стан {current_state}")
+            print(f"📊 {symbol}: початковий стан {current_state} (EMA12={ema_fast:.2f}, EMA26={ema_slow:.2f})")
             return None, None, price
         
+        # ПЕРЕВІРКА НА ДУБЛІКАТИ - ігноруємо часті сигнали
+        if symbol in self.last_signal_time:
+            time_diff = current_time - self.last_signal_time[symbol]
+            if time_diff < self.min_signal_interval:
+                # Якщо минуло менше 30 секунд - ігноруємо
+                return None, None, price
+        
+        # ПЕРЕТИН! Стан змінився
         if current_state != self.last_state[symbol]:
             signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
+            
+            # Запам'ятовуємо час сигналу
+            self.last_signal_time[symbol] = current_time
             self.last_state[symbol] = current_state
+            
+            print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {price}, EMA12={ema_fast:.2f}, EMA26={ema_slow:.2f})")
             return signal, current_state, price
         
         return None, None, price
     
     def close_position(self, symbol, exit_price, exit_time):
+        """Закриває позицію і рахує результат"""
         if symbol in self.positions:
             pos = self.positions[symbol]
             pos.exit_price = exit_price
@@ -111,6 +132,7 @@ class ScalperBot:
         return None
     
     def open_position(self, symbol, side, price, current_time):
+        """Відкриває нову позицію"""
         self.positions[symbol] = Position(symbol, side, price, current_time)
         
         msg = (f"🆓 *НОВА ПОЗИЦІЯ*\n"
@@ -121,6 +143,7 @@ class ScalperBot:
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
     def send_trade_result(self, trade):
+        """Відправляє результат угоди"""
         emoji = '✅' if trade['pnl'] > 0 else '❌'
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
@@ -132,6 +155,7 @@ class ScalperBot:
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
     def monitor_loop(self):
+        """Головний цикл моніторингу з захистом від дублікатів"""
         print("🤖 Моніторинг запущено. Чекаємо на перетин EMA...")
         
         while self.running:
@@ -139,28 +163,45 @@ class ScalperBot:
             
             for symbol in config.SYMBOLS:
                 try:
+                    # Пропускаємо якщо тільки що була угода (додатковий захист)
+                    if symbol in self.last_trade_time:
+                        time_since_last = current_time - self.last_trade_time[symbol]
+                        if time_since_last < 25:  # 25 секунд перерва між угодами
+                            continue
+                    
                     signal, state, price = self.check_crossover(symbol)
                     
                     if signal:
-                        print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {price})")
-                        
+                        # Якщо є відкрита позиція для цієї пари
                         if symbol in self.positions:
                             current_pos = self.positions[symbol]
                             
+                            # Закриваємо ТІЛЬКИ якщо сигнал протилежний
                             if (current_pos.side == 'LONG' and signal == 'SHORT') or \
                                (current_pos.side == 'SHORT' and signal == 'LONG'):
+                                
+                                # Закриваємо стару позицію
                                 self.close_position(symbol, price, current_time)
+                                
+                                # Маленька пауза щоб уникнути дублікатів
+                                time.sleep(1)
+                                
+                                # Відкриваємо нову позицію (протилежну)
                                 self.open_position(symbol, signal, price, current_time)
+                                self.last_trade_time[symbol] = current_time
+                                
                             else:
                                 print(f"⚠️ {symbol}: ігноруємо {signal} - вже є {current_pos.side}")
                         
                         else:
+                            # Немає позиції - відкриваємо нову
                             self.open_position(symbol, signal, price, current_time)
+                            self.last_trade_time[symbol] = current_time
                     
                 except Exception as e:
                     print(f"Помилка для {symbol}: {e}")
             
-            time.sleep(5)
+            time.sleep(5)  # Перевірка кожні 5 секунд
 
 # ===== КОМАНДИ TELEGRAM =====
 @bot.message_handler(commands=['start'])

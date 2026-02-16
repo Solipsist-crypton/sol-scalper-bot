@@ -201,6 +201,232 @@ def stop_cmd(message):
     else:
         bot.reply_to(message, "Бот не запущено")
 
+@bot.message_handler(commands=['price'])
+def price_cmd(message):
+    try:
+        msg = "💰 *Поточні ціни (KuCoin):*\n"
+        for symbol in config.SYMBOLS:
+            kucoin_symbol = symbol.replace('USDT', '-USDT')
+            ticker = client.get_ticker(kucoin_symbol)
+            price = float(ticker['price'])
+            msg += f"\n{symbol}: ${round(price, 2)}"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Помилка: {e}")
+
+@bot.message_handler(commands=['status'])
+def status_cmd(message):
+    global scalper_instance
+    if scalper_instance and scalper_instance.positions:
+        msg = "📊 *Активні позиції:*\n"
+        for symbol, pos in scalper_instance.positions.items():
+            _, _, current_price = scalper_instance.get_emas(symbol)
+            if pos.side == 'LONG':
+                pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100
+            else:
+                pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100
+            hold_time = (time.time() - pos.entry_time) / 60
+            msg += (f"\n{symbol}: {'🟢 LONG' if pos.side == 'LONG' else '🔴 SHORT'}\n"
+                    f"Вхід: ${round(pos.entry_price, 2)}\n"
+                    f"Поточна PnL: {pnl:+.2f}% | {round(hold_time, 1)} хв\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає активних позицій")
+
+@bot.message_handler(commands=['history'])
+def history_cmd(message):
+    trades = db.get_trades(limit=10)
+    if len(trades) > 0:
+        msg = "📜 *Останні 10 угод:*\n\n"
+        for _, trade in trades.iterrows():
+            emoji = '✅' if trade['pnl_percent'] > 0 else '❌'
+            msg += (f"{emoji} {trade['symbol']} {trade['side']}\n"
+                   f"PnL: {trade['pnl_percent']:+.2f}% | {trade['hold_minutes']} хв\n"
+                   f"{trade['entry_time']} → {trade['exit_time']}\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Історія угод порожня")
+
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    analysis = db.get_detailed_analysis()
+    if not analysis:
+        bot.reply_to(message, "Немає даних для статистики")
+        return
+    
+    msg = "📊 *ЗАГАЛЬНА СТАТИСТИКА*\n\n"
+    msg += f"📈 Всього угод: {analysis['total_trades']}\n"
+    msg += f"✅ Прибуткових: {analysis['wins']}\n"
+    msg += f"❌ Збиткових: {analysis['losses']}\n"
+    msg += f"🎯 Загальний вінрейт: {analysis['winrate']:.1f}%\n"
+    msg += f"💰 Загальний PnL: {analysis['total_pnl']:+.2f}%\n"
+    msg += f"📊 Середній PnL: {analysis['avg_pnl']:+.2f}%\n"
+    msg += f"🏆 Найкраща угода: {analysis['best_trade']:+.2f}%\n"
+    msg += f"💔 Найгірша угода: {analysis['worst_trade']:+.2f}%\n"
+    msg += f"⏱ Сер. час утримання: {analysis['avg_hold']:.1f} хв\n"
+    msg += f"📊 Профіт фактор: {analysis['profit_factor']:.2f}"
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['maxprofits'])
+def maxprofits_cmd(message):
+    max_profits = db.get_max_profits(limit=10)
+    if len(max_profits) > 0:
+        msg = "🏆 *ТОП-10 НАЙБІЛЬШИХ ПРИБУТКІВ*\n\n"
+        for i, (_, trade) in enumerate(max_profits.iterrows(), 1):
+            emoji = '🥇' if i == 1 else '🥈' if i == 2 else '🥉' if i == 3 else '📈'
+            msg += (f"{emoji} *{i}. {trade['symbol']} {trade['side']}*\n"
+                   f"   PnL: *{trade['pnl_percent']:+.2f}%*\n"
+                   f"   Вхід: ${trade['entry_price']} → Вихід: ${trade['exit_price']}\n"
+                   f"   Час: {trade['hold_minutes']} хв\n"
+                   f"   {trade['entry_time']} → {trade['exit_time']}\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних про прибутки")
+
+@bot.message_handler(commands=['maxlosses'])
+def maxlosses_cmd(message):
+    max_losses = db.get_max_losses(limit=10)
+    if len(max_losses) > 0:
+        msg = "💔 *ТОП-10 НАЙБІЛЬШИХ ЗБИТКІВ*\n\n"
+        for i, (_, trade) in enumerate(max_losses.iterrows(), 1):
+            emoji = '💀' if i == 1 else '😱' if i == 2 else '😭' if i == 3 else '📉'
+            msg += (f"{emoji} *{i}. {trade['symbol']} {trade['side']}*\n"
+                   f"   PnL: *{trade['pnl_percent']:+.2f}%*\n"
+                   f"   Вхід: ${trade['entry_price']} → Вихід: ${trade['exit_price']}\n"
+                   f"   Час: {trade['hold_minutes']} хв\n"
+                   f"   {trade['entry_time']} → {trade['exit_time']}\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних про збитки")
+
+@bot.message_handler(commands=['records'])
+def records_cmd(message):
+    records = db.get_records()
+    if len(records) > 0:
+        msg = "🎯 *РЕКОРДИ*\n\n"
+        for _, record in records.iterrows():
+            if record['record_type'] == 'MAX_PROFIT':
+                msg += f"🏆 *Найбільший прибуток:*\n"
+                msg += f"   {record['symbol']} {record['side']}: +{record['value']:.2f}%\n"
+                msg += f"   Вхід: ${record['entry_price']} → Вихід: ${record['exit_price']}\n"
+                msg += f"   {record['entry_time']} → {record['exit_time']}\n\n"
+            elif record['record_type'] == 'MAX_LOSS':
+                msg += f"💔 *Найбільший збиток:*\n"
+                msg += f"   {record['symbol']} {record['side']}: {record['value']:.2f}%\n"
+                msg += f"   Вхід: ${record['entry_price']} → Вихід: ${record['exit_price']}\n"
+                msg += f"   {record['entry_time']} → {record['exit_time']}\n\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає рекордів")
+
+@bot.message_handler(commands=['daily'])
+def daily_cmd(message):
+    daily = db.get_daily_stats(days=7)
+    if len(daily) > 0:
+        msg = "📅 *ОСТАННІ 7 ДНІВ*\n\n"
+        for _, day in daily.iterrows():
+            winrate = (day['wins'] / day['total_trades'] * 100) if day['total_trades'] > 0 else 0
+            msg += (f"*{day['date']} - {day['symbol']}*\n"
+                   f"Угод: {day['total_trades']} | PnL: {day['total_pnl']:+.2f}%\n"
+                   f"✅ {day['wins']} | ❌ {day['losses']} | вінрейт: {winrate:.0f}%\n"
+                   f"📈 Max: {day['max_profit']:+.2f}% | Min: {day['max_loss']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за дні")
+
+@bot.message_handler(commands=['hourly'])
+def hourly_cmd(message):
+    hourly = db.get_hourly_stats()
+    if len(hourly) > 0:
+        msg = "🕐 *ГОДИННА СТАТИСТИКА*\n\n"
+        for _, hour in hourly.iterrows():
+            msg += (f"*{hour['hour']:02d}:00 - {hour['symbol']}*\n"
+                   f"Угод: {hour['total_trades']} | PnL: {hour['avg_pnl']:+.2f}%\n"
+                   f"Вінрейт: {hour['winrate']}% | Max: {hour['max_profit']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за години")
+
+@bot.message_handler(commands=['weekly'])
+def weekly_cmd(message):
+    weekly = db.get_weekly_stats(weeks=4)
+    if len(weekly) > 0:
+        msg = "📊 *ТИЖНЕВА СТАТИСТИКА*\n\n"
+        for _, week in weekly.iterrows():
+            winrate = (week['wins'] / week['total_trades'] * 100) if week['total_trades'] > 0 else 0
+            msg += (f"*Тиждень {week['week']}, {week['year']} - {week['symbol']}*\n"
+                   f"Угод: {week['total_trades']} | PnL: {week['total_pnl']:+.2f}%\n"
+                   f"✅ {week['wins']} | ❌ {week['losses']} | вінрейт: {winrate:.0f}%\n"
+                   f"📈 Max: {week['max_profit']:+.2f}% | Min: {week['max_loss']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за тижні")
+
+@bot.message_handler(commands=['monthly'])
+def monthly_cmd(message):
+    monthly = db.get_monthly_stats(months=6)
+    if len(monthly) > 0:
+        msg = "📊 *МІСЯЧНА СТАТИСТИКА*\n\n"
+        months = ['Січ', 'Лют', 'Бер', 'Кві', 'Тра', 'Чер', 'Лип', 'Сер', 'Вер', 'Жов', 'Лис', 'Гру']
+        for _, month in monthly.iterrows():
+            winrate = (month['wins'] / month['total_trades'] * 100) if month['total_trades'] > 0 else 0
+            msg += (f"*{months[month['month']-1]} {month['year']} - {month['symbol']}*\n"
+                   f"Угод: {month['total_trades']} | PnL: {month['total_pnl']:+.2f}%\n"
+                   f"✅ {month['wins']} | ❌ {month['losses']} | вінрейт: {winrate:.0f}%\n"
+                   f"📈 Max: {month['max_profit']:+.2f}% | Min: {month['max_loss']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за місяці")
+
+@bot.message_handler(commands=['analyze'])
+def analyze_cmd(message):
+    analysis = db.get_detailed_analysis()
+    if not analysis:
+        bot.reply_to(message, "Немає даних для аналізу")
+        return
+    
+    msg = "📊 *ДЕТАЛЬНИЙ АНАЛІЗ*\n\n"
+    
+    # Загальна статистика
+    msg += f"*ЗАГАЛЬНЕ*\n"
+    msg += f"📈 Угод: {analysis['total_trades']}\n"
+    msg += f"💰 Заг. PnL: {analysis['total_pnl']:+.2f}%\n"
+    msg += f"🎯 Вінрейт: {analysis['winrate']:.1f}%\n"
+    msg += f"📊 Профіт фактор: {analysis['profit_factor']:.2f}\n\n"
+    
+    # Рекорди
+    if analysis['records']:
+        msg += f"*РЕКОРДИ*\n"
+        for record in analysis['records']:
+            if record['record_type'] == 'MAX_PROFIT':
+                msg += f"🏆 Max прибуток: +{record['value']:.2f}% ({record['symbol']})\n"
+            else:
+                msg += f"💔 Max збиток: {record['value']:.2f}% ({record['symbol']})\n"
+        msg += "\n"
+    
+    # Аналіз по годинах
+    msg += f"*АНАЛІЗ ПО ГОДИНАХ*\n"
+    for hour, stats in analysis['by_hour'].iterrows():
+        if stats[('pnl_percent', 'count')] >= 3:
+            msg += (f"{hour:02d}:00 - {hour+1:02d}:00 | "
+                   f"угод: {int(stats[('pnl_percent', 'count')])} | "
+                   f"сер: {stats[('pnl_percent', 'mean')]:+.2f}% | "
+                   f"max: {stats[('pnl_percent', 'max')]:+.2f}%\n")
+    msg += "\n"
+    
+    # Аналіз по днях тижня
+    msg += f"*АНАЛІЗ ПО ДНЯХ ТИЖНЯ*\n"
+    days = ['Пон', 'Вів', 'Сер', 'Чет', 'Пят', 'Суб', 'Нед']
+    for day, stats in analysis['by_day'].iterrows():
+        if stats[('pnl_percent', 'count')] >= 3:
+            msg += (f"{days[day]} | "
+                   f"угод: {int(stats[('pnl_percent', 'count')])} | "
+                   f"сер: {stats[('pnl_percent', 'mean')]:+.2f}% | "
+                   f"max: {stats[('pnl_percent', 'max')]:+.2f}%\n")
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
 @bot.message_handler(commands=['cleardb'])
 def cleardb_cmd(message):
     """Очистити базу даних (тільки якщо треба)"""
@@ -233,4 +459,78 @@ def callback_handler(call):
                             call.message.chat.id, 
                             call.message.message_id)
 
-# ... (решта команд /price, /status, /history, /stats, /maxprofits, /maxlosses, /records, /daily, /hourly, /weekly, /monthly, /analyze, /menu - БЕЗ ЗМІН)
+@bot.message_handler(commands=['menu'])
+def menu_cmd(message):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        types.KeyboardButton('/price'),
+        types.KeyboardButton('/status'),
+        types.KeyboardButton('/history'),
+        types.KeyboardButton('/stats'),
+        types.KeyboardButton('/maxprofits'),
+        types.KeyboardButton('/maxlosses'),
+        types.KeyboardButton('/records'),
+        types.KeyboardButton('/daily'),
+        types.KeyboardButton('/hourly'),
+        types.KeyboardButton('/weekly'),
+        types.KeyboardButton('/monthly'),
+        types.KeyboardButton('/analyze'),
+        types.KeyboardButton('/cleardb'),
+        types.KeyboardButton('/start'),
+        types.KeyboardButton('/stop'),
+        types.KeyboardButton('/menu')
+    ]
+    markup.add(*buttons)
+    
+    bot.send_message(message.chat.id, "📱 *Меню керування*\n\nВиберіть команду:", 
+                    reply_markup=markup, parse_mode='Markdown')
+
+# Обробка текстових команд
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    text = message.text
+    if text == '/price':
+        price_cmd(message)
+    elif text == '/status':
+        status_cmd(message)
+    elif text == '/history':
+        history_cmd(message)
+    elif text == '/stats':
+        stats_cmd(message)
+    elif text == '/maxprofits':
+        maxprofits_cmd(message)
+    elif text == '/maxlosses':
+        maxlosses_cmd(message)
+    elif text == '/records':
+        records_cmd(message)
+    elif text == '/daily':
+        daily_cmd(message)
+    elif text == '/hourly':
+        hourly_cmd(message)
+    elif text == '/weekly':
+        weekly_cmd(message)
+    elif text == '/monthly':
+        monthly_cmd(message)
+    elif text == '/analyze':
+        analyze_cmd(message)
+    elif text == '/cleardb':
+        cleardb_cmd(message)
+    elif text == '/start':
+        start_cmd(message)
+    elif text == '/stop':
+        stop_cmd(message)
+    elif text == '/menu':
+        menu_cmd(message)
+
+if __name__ == '__main__':
+    print("🤖 Telegram Scalper Bot (KuCoin) запущено...")
+    print(f"Моніторинг пар: {config.SYMBOLS}")
+    print(f"EMA {config.EMA_FAST}/{config.EMA_SLOW} на {config.INTERVAL}")
+    print("Команди: /menu - відкрити меню")
+    
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        print(f"❌ Помилка: {e}")
+    finally:
+        db.close()

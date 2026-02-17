@@ -86,8 +86,9 @@ class ScalperBot:
         self.last_signal = {}
         self.last_trade_time = {}
         # 🎯 Налаштування трейлінг-стопу
-        self.trailing_activation = 0.3  # Активація після +0.3%
-        self.trailing_step = 0.2  # Крок трейлінгу 0.2%
+        self.trailing_activation = 0.1  # Активація після +0.3%
+        self.trailing_step = 0.1  # Крок трейлінгу 0.2%
+        self.hard_trail_drop = 0.15
         self.check_interval = 5  # Перевірка кожні 5 секунд
     
     def convert_symbol(self, symbol):
@@ -148,13 +149,11 @@ class ScalperBot:
         return None, None, price
     
     def check_trailing_stop(self, symbol, current_price):
-        """Перевіряє трейлінг-стоп для позиції"""
         if symbol not in self.positions:
             return False
         
         pos = self.positions[symbol]
         
-        # Рахуємо поточний PnL
         if pos.side == 'LONG':
             current_pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100
         else:
@@ -163,24 +162,27 @@ class ScalperBot:
         # Оновлюємо максимальний PnL
         if current_pnl > pos.max_pnl:
             pos.max_pnl = current_pnl
+            print(f"📈 {symbol}: новий максимум {pos.max_pnl:.2f}%")
             
-            # Активація трейлінг-стопу після досягнення порогу
+            # Активація трейлінг-стопу
             if pos.max_pnl >= self.trailing_activation and not pos.trailing_activated:
                 pos.trailing_activated = True
                 pos.trailing_stop = pos.max_pnl - self.trailing_step
-                print(f"🎯 {symbol}: активовано трейлінг-стоп на {pos.trailing_stop:.2f}%")
+                print(f"🎯 {symbol}: АКТИВОВАНО трейлінг на {pos.trailing_stop:.2f}%")
             
-            # Оновлюємо трейлінг-стоп
+            # Оновлення трейлінгу
             elif pos.trailing_activated:
                 new_stop = pos.max_pnl - self.trailing_step
                 if new_stop > pos.trailing_stop:
                     pos.trailing_stop = new_stop
-                    print(f"📈 {symbol}: трейлінг підтягнуто до {pos.trailing_stop:.2f}%")
+                    print(f"🔄 {symbol}: трейлінг підтягнуто до {pos.trailing_stop:.2f}%")
         
-        # Перевіряємо чи спрацював трейлінг-стоп
-        if pos.trailing_activated and current_pnl <= pos.trailing_stop:
-            print(f"🔥 {symbol}: трейлінг-стоп спрацював! Фіксуємо {pos.max_pnl:.2f}%")
-            return True
+        # 🛡️ ЖОРСТКИЙ ТРЕЙЛІНГ: закриваємо при падінні на 0.15% від максимуму
+        if pos.trailing_activated:
+            drop_from_max = pos.max_pnl - current_pnl
+            if drop_from_max >= 0.15:  # Якщо впало на 0.15% від максимуму
+                print(f"🔥 {symbol}: ЖОРСТКИЙ ТРЕЙЛІНГ! Падіння {drop_from_max:.2f}% від максимуму")
+                return True
         
         return False
     

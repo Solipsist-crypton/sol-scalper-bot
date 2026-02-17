@@ -87,9 +87,8 @@ class ScalperBot:
         self.positions = {}
         self.last_state = {}  # {symbol: 'ABOVE'/'BELOW'}
         self.running = True
-        # 🛡️ Захист від дублікатів
-        self.last_signal_time = {}  # {symbol: timestamp}
-        self.min_signal_interval = 60  # мінімум 60 секунд між сигналами
+        # 🛡️ Захист ТІЛЬКИ від дублікатів однакових сигналів
+        self.last_signal = {}  # {symbol: {'type': 'LONG'/'SHORT', 'time': timestamp}}
         self.last_trade_time = {}  # {symbol: timestamp}
     
     def convert_symbol(self, symbol):
@@ -121,7 +120,7 @@ class ScalperBot:
             return None, None, None
     
     def check_crossover(self, symbol):
-        """Перевіряє перетин EMA для пари з захистом від дублікатів"""
+        """Перевіряє перетин EMA для пари"""
         ema_fast, ema_slow, price = self.get_emas(symbol)
         if not ema_fast:
             return None, None, None
@@ -135,20 +134,22 @@ class ScalperBot:
             print(f"📊 {symbol}: початковий стан {current_state} (EMA12={ema_fast:.2f}, EMA26={ema_slow:.2f})")
             return None, None, price
         
-        # 🛡️ ЗАХИСТ ВІД ДУБЛІКАТІВ
-        # Перевіряємо чи не було сигналу за останні 60 секунд
-        if symbol in self.last_signal_time:
-            time_diff = current_time - self.last_signal_time[symbol]
-            if time_diff < self.min_signal_interval:
-                print(f"⏱️ {symbol}: ігноруємо сигнал (минуло {time_diff:.1f} сек, мінімум {self.min_signal_interval} сек)")
-                return None, None, price
-        
         # ПЕРЕТИН! Стан змінився
         if current_state != self.last_state[symbol]:
             signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
             
-            # Запам'ятовуємо час сигналу
-            self.last_signal_time[symbol] = current_time
+            # 🛡️ ЗАХИСТ ТІЛЬКИ ВІД ДУБЛІКАТІВ (однаковий сигнал протягом 30с)
+            if symbol in self.last_signal:
+                last_signal_type = self.last_signal[symbol]['type']
+                last_signal_time = self.last_signal[symbol]['time']
+                
+                # Якщо такий самий сигнал був менше 30с тому - ігноруємо
+                if signal == last_signal_type and (current_time - last_signal_time) < 30:
+                    print(f"⏱️ {symbol}: ігноруємо дублікат {signal}")
+                    return None, None, price
+            
+            # Запам'ятовуємо сигнал
+            self.last_signal[symbol] = {'type': signal, 'time': current_time}
             self.last_state[symbol] = current_state
             
             print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {price}, EMA12={ema_fast:.2f}, EMA26={ema_slow:.2f})")
@@ -274,12 +275,6 @@ class ScalperBot:
             
             for symbol in config.SYMBOLS:
                 try:
-                    # 🛡️ Додаткова перевірка - пропускаємо якщо щойно була угода
-                    if symbol in self.last_trade_time:
-                        time_since_last = current_time - self.last_trade_time[symbol]
-                        if time_since_last < 30:  # 30 секунд перерва
-                            continue
-                    
                     signal, state, price = self.check_crossover(symbol)
                     
                     if signal:
@@ -291,8 +286,6 @@ class ScalperBot:
                             if (current_pos.side == 'LONG' and signal == 'SHORT') or \
                                (current_pos.side == 'SHORT' and signal == 'LONG'):
                                 self.close_position(symbol, price, current_time)
-                                # Невелика пауза щоб уникнути дублікатів
-                                time.sleep(1)
                                 # Відкриваємо нову позицію (протилежну)
                                 self.open_position(symbol, signal, price, current_time)
                             else:

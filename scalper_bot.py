@@ -124,7 +124,7 @@ class ScalperBot:
         
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         current_time = time.time()
-        print(f"📊 {symbol}: EMA12={ema_fast:.2f}, EMA26={ema_slow:.2f}, diff={(ema_fast-ema_slow):.2f}")
+        
         if symbol not in self.last_state:
             self.last_state[symbol] = current_state
             print(f"📊 {symbol}: початковий стан {current_state}")

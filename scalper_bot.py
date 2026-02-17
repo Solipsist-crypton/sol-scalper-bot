@@ -86,9 +86,9 @@ class ScalperBot:
         self.last_signal = {}
         self.last_trade_time = {}
         # 🎯 Налаштування трейлінг-стопу
-        self.trailing_activation = 0.1  # Активація після +0.3%
-        self.trailing_step = 0.1  # Крок трейлінгу 0.2%
-        self.hard_trail_drop = 0.15
+        self.trailing_activation = 0.1  # Активація після +0.1%
+        self.trailing_step = 0.1  # Крок трейлінгу 0.1%
+        self.hard_trail_drop = 0.15  # Закриття при падінні на 0.15% від максимуму
         self.check_interval = 5  # Перевірка кожні 5 секунд
     
     def convert_symbol(self, symbol):
@@ -140,15 +140,18 @@ class ScalperBot:
                 last_signal_type = self.last_signal[symbol]['type']
                 last_signal_time = self.last_signal[symbol]['time']
                 if signal == last_signal_type and (current_time - last_signal_time) < 30:
+                    print(f"⏱️ {symbol}: ігноруємо дублікат {signal}")
                     return None, None, price
             
             self.last_signal[symbol] = {'type': signal, 'time': current_time}
             self.last_state[symbol] = current_state
+            print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {price})")
             return signal, current_state, price
         
         return None, None, price
     
     def check_trailing_stop(self, symbol, current_price):
+        """Перевіряє трейлінг-стоп для позиції"""
         if symbol not in self.positions:
             return False
         
@@ -161,16 +164,17 @@ class ScalperBot:
         
         # Оновлюємо максимальний PnL
         if current_pnl > pos.max_pnl:
+            old_max = pos.max_pnl
             pos.max_pnl = current_pnl
             print(f"📈 {symbol}: новий максимум {pos.max_pnl:.2f}%")
             
-            # Активація трейлінг-стопу
+            # Активація трейлінг-стопу при досягненні порогу
             if pos.max_pnl >= self.trailing_activation and not pos.trailing_activated:
                 pos.trailing_activated = True
                 pos.trailing_stop = pos.max_pnl - self.trailing_step
                 print(f"🎯 {symbol}: АКТИВОВАНО трейлінг на {pos.trailing_stop:.2f}%")
             
-            # Оновлення трейлінгу
+            # Оновлення трейлінг-стопу при новому максимумі
             elif pos.trailing_activated:
                 new_stop = pos.max_pnl - self.trailing_step
                 if new_stop > pos.trailing_stop:
@@ -180,9 +184,14 @@ class ScalperBot:
         # 🛡️ ЖОРСТКИЙ ТРЕЙЛІНГ: закриваємо при падінні на 0.15% від максимуму
         if pos.trailing_activated:
             drop_from_max = pos.max_pnl - current_pnl
-            if drop_from_max >= 0.15:  # Якщо впало на 0.15% від максимуму
+            if drop_from_max >= self.hard_trail_drop:
                 print(f"🔥 {symbol}: ЖОРСТКИЙ ТРЕЙЛІНГ! Падіння {drop_from_max:.2f}% від максимуму")
                 return True
+        
+        # Класичний трейлінг-стоп (для надійності)
+        if pos.trailing_activated and current_pnl <= pos.trailing_stop:
+            print(f"🎯 {symbol}: ТРЕЙЛІНГ-СТОП спрацював при {current_pnl:.2f}%")
+            return True
         
         return False
     
@@ -242,8 +251,15 @@ class ScalperBot:
                 'exit_reason': reason
             }
             
+            # Зберігаємо в БД
             db.add_trade(trade_info)
+            
+            # 📤 Відправляємо в канал
+            self.send_to_channel(trade_info)
+            
+            # Відправляємо результат
             self.send_trade_result(trade_info, reason)
+            
             del self.positions[symbol]
             return trade_info
         return None
@@ -277,21 +293,43 @@ class ScalperBot:
                f"🕒 {trade['entry_time']} → {trade['exit_time']}")
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
+    def send_to_channel(self, trade_info):
+        """Відправляє угоду в Telegram канал"""
+        try:
+            emoji = '✅' if trade_info['pnl'] > 0 else '❌'
+            reason_emoji = "🎯" if trade_info.get('exit_reason') == 'trailing' else "📊"
+            
+            msg = (f"{emoji} *УГОДА*\n"
+                   f"Монета: {trade_info['symbol']}\n"
+                   f"Тип: {'🟢 LONG' if trade_info['side'] == 'LONG' else '🔴 SHORT'}\n"
+                   f"Вхід: ${trade_info['entry']} → Вихід: ${trade_info['exit']}\n"
+                   f"📊 PnL: *{trade_info['pnl']:+.2f}%*\n"
+                   f"📈 Макс: {trade_info['max_pnl']:+.2f}%\n"
+                   f"{reason_emoji} {trade_info.get('exit_reason', 'signal')}\n"
+                   f"⏱ {trade_info['hold_minutes']} хв\n"
+                   f"🕒 {trade_info['entry_time']} → {trade_info['exit_time']}")
+            
+            # Використовуємо глобальний bot
+            global bot
+            bot.send_message(config.CHANNEL_ID, msg, parse_mode='Markdown')
+            print(f"📤 Угоду відправлено в канал")
+        except Exception as e:
+            print(f"❌ Помилка відправки в канал: {e}")
+    
     def monitor_loop(self):
         print("🤖 Моніторинг запущено. Чекаємо на перетин EMA...")
-        print(f"🎯 Трейлінг-стоп: активація +{self.trailing_activation}%, крок {self.trailing_step}%")
+        print(f"🎯 Трейлінг-стоп: активація +{self.trailing_activation}%, крок {self.trailing_step}%, жорсткий стоп {self.hard_trail_drop}%")
         
         while self.running:
             current_time = time.time()
             
-            # Спочатку перевіряємо трейлінг-стопи для всіх відкритих позицій
+            # Спочатку перевіряємо трейлінг-стопи для всіх відкритих позиціЙ
             for symbol in list(self.positions.keys()):
                 try:
                     _, _, current_price = self.get_emas(symbol)
                     if current_price:
                         if self.check_trailing_stop(symbol, current_price):
                             self.close_position(symbol, current_price, current_time, "trailing")
-                            # Після закриття по трейлінгу чекаємо новий сигнал
                 except Exception as e:
                     print(f"Помилка трейлінгу для {symbol}: {e}")
             
@@ -301,7 +339,6 @@ class ScalperBot:
                     signal, state, price = self.check_crossover(symbol)
                     
                     if signal:
-                        # Якщо є відкрита позиція - закриваємо по сигналу
                         if symbol in self.positions:
                             current_pos = self.positions[symbol]
                             

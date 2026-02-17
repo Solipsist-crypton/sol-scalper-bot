@@ -86,10 +86,8 @@ class ScalperBot:
         self.last_signal = {}
         self.last_trade_time = {}
         # 🎯 Налаштування трейлінг-стопу
-        self.trailing_activation = 0.1  # Активація після +0.1%
-        self.trailing_step = 0.1  # Крок трейлінгу 0.1%
-        self.hard_trail_drop = 0.15  # Закриття при падінні на 0.15% від максимуму
-        self.check_interval = 5  # Перевірка кожні 5 секунд
+        self.check_interval = 1  # Перевірка КОЖНУ СЕКУНДУ для швидкої реакції
+        self.fix_percent = 0.7  # Фіксуємо 70% від максимуму
     
     def convert_symbol(self, symbol):
         return symbol.replace('USDT', '-USDT')
@@ -151,7 +149,7 @@ class ScalperBot:
         return None, None, price
     
     def check_trailing_stop(self, symbol, current_price):
-        """Перевіряє трейлінг-стоп з фіксацією 70%"""
+        """Перевіряє трейлінг-стоп з фіксацією 70% і швидкою реакцією"""
         if symbol not in self.positions:
             return False
 
@@ -167,18 +165,18 @@ class ScalperBot:
             pos.max_pnl = current_pnl
             print(f"📈 {symbol}: новий максимум {pos.max_pnl:.2f}%")
             
-            # 🛡️ ФІКСУЄМО 70% ВІД МАКСИМУМУ (тільки якщо є профіт)
-            if pos.max_pnl >= 0.1:  # Навіть маленький профіт фіксуємо
-                fix_level = pos.max_pnl * 0.7  # Завжди 70%
-                if not pos.trailing_activated or fix_level > pos.trailing_stop:
-                    pos.trailing_activated = True
-                    pos.trailing_stop = fix_level
-                    print(f"🎯 {symbol}: фіксація 70% на {pos.trailing_stop:.2f}%")
+            # 🛡️ ФІКСУЄМО 70% ВІД МАКСИМУМУ
+            if pos.max_pnl >= 0.1:  # Навіть маленький профіт
+                fix_level = pos.max_pnl * self.fix_percent
+                pos.trailing_activated = True
+                pos.trailing_stop = fix_level
+                print(f"🎯 {symbol}: фіксація {self.fix_percent*100}% на {pos.trailing_stop:.2f}%")
 
-        # Перевіряємо чи спрацювала фіксація
-        if pos.trailing_activated and current_pnl <= pos.trailing_stop:
-            print(f"🔥 {symbol}: фіксація при {current_pnl:.2f}% (70% від {pos.max_pnl:.2f}% = {pos.trailing_stop:.2f}%)")
-            return True
+        # 🚨 ШВИДКИЙ ТРЕЙЛІНГ - перевіряємо чи профіт впав нижче 70% від максимуму
+        if pos.trailing_activated:
+            if current_pnl <= pos.max_pnl * self.fix_percent:
+                print(f"🔥 {symbol}: швидка фіксація! {current_pnl:.2f}% ≤ {self.fix_percent*100}% від {pos.max_pnl:.2f}%")
+                return True
 
         return False
     
@@ -225,6 +223,11 @@ class ScalperBot:
             
             hold_minutes = (exit_time - pos.entry_time) / 60
             
+            # Додаємо інформацію про фіксацію
+            fix_info = ""
+            if reason == "trailing" and 'max_pnl' in locals():
+                fix_info = f"🔒 Фіксація {int(self.fix_percent*100)}%: {pos.max_pnl * self.fix_percent:.2f}%\n"
+            
             trade_info = {
                 'symbol': symbol,
                 'side': pos.side,
@@ -232,6 +235,8 @@ class ScalperBot:
                 'exit': round(exit_price, 2),
                 'pnl': round(pos.pnl_percent, 2),
                 'max_pnl': round(max_pnl, 2),
+                'fix_percent': self.fix_percent,
+                'fix_level': round(pos.max_pnl * self.fix_percent, 2) if pos.max_pnl > 0 else 0,
                 'hold_minutes': round(hold_minutes, 1),
                 'entry_time': datetime.fromtimestamp(pos.entry_time).strftime('%H:%M:%S'),
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S'),
@@ -241,7 +246,7 @@ class ScalperBot:
             # Зберігаємо в БД
             db.add_trade(trade_info)
             
-            # 📤 Відправляємо в канал
+            # 📤 Відправляємо в канал (якщо налаштовано)
             self.send_to_channel(trade_info)
             
             # Відправляємо результат
@@ -267,6 +272,11 @@ class ScalperBot:
         reason_emoji = "📊" if reason == "signal" else "🎯"
         reason_text = "сигнал EMA" if reason == "signal" else "трейлінг-стоп"
         
+        # Додаємо інформацію про фіксацію
+        fix_info = ""
+        if reason == "trailing" and 'fix_level' in trade and trade['fix_level'] > 0:
+            fix_info = f"🔒 Фіксація {int(trade['fix_percent']*100)}%: {trade['fix_level']:.2f}%\n"
+        
         max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.2f}%\n"
         
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
@@ -275,6 +285,7 @@ class ScalperBot:
                f"Вхід: ${trade['entry']} → Вихід: ${trade['exit']}\n"
                f"📊 PnL: *{trade['pnl']:+.2f}%*\n"
                f"{max_profit_line}"
+               f"{fix_info}"
                f"{reason_emoji} Причина: {reason_text}\n"
                f"⏱ Час утримання: {trade['hold_minutes']} хв\n"
                f"🕒 {trade['entry_time']} → {trade['exit_time']}")
@@ -283,8 +294,18 @@ class ScalperBot:
     def send_to_channel(self, trade_info):
         """Відправляє угоду в Telegram канал"""
         try:
+            # Перевіряємо чи налаштовано канал
+            if not hasattr(config, 'CHANNEL_ID') or not config.CHANNEL_ID:
+                print("⚠️ CHANNEL_ID не налаштовано, пропускаємо відправку в канал")
+                return
+            
             emoji = '✅' if trade_info['pnl'] > 0 else '❌'
             reason_emoji = "🎯" if trade_info.get('exit_reason') == 'trailing' else "📊"
+            
+            # Додаємо інформацію про фіксацію
+            fix_info = ""
+            if trade_info.get('exit_reason') == 'trailing' and 'fix_level' in trade_info and trade_info['fix_level'] > 0:
+                fix_info = f"🔒 Фіксація {int(trade_info['fix_percent']*100)}%: {trade_info['fix_level']:.2f}%\n"
             
             msg = (f"{emoji} *УГОДА*\n"
                    f"Монета: {trade_info['symbol']}\n"
@@ -292,6 +313,7 @@ class ScalperBot:
                    f"Вхід: ${trade_info['entry']} → Вихід: ${trade_info['exit']}\n"
                    f"📊 PnL: *{trade_info['pnl']:+.2f}%*\n"
                    f"📈 Макс: {trade_info['max_pnl']:+.2f}%\n"
+                   f"{fix_info}"
                    f"{reason_emoji} {trade_info.get('exit_reason', 'signal')}\n"
                    f"⏱ {trade_info['hold_minutes']} хв\n"
                    f"🕒 {trade_info['entry_time']} → {trade_info['exit_time']}")
@@ -299,18 +321,18 @@ class ScalperBot:
             # Використовуємо глобальний bot
             global bot
             bot.send_message(config.CHANNEL_ID, msg, parse_mode='Markdown')
-            print(f"📤 Угоду відправлено в канал")
+            print(f"📤 Угоду відправлено в канал {config.CHANNEL_ID}")
         except Exception as e:
             print(f"❌ Помилка відправки в канал: {e}")
     
     def monitor_loop(self):
         print("🤖 Моніторинг запущено. Чекаємо на перетин EMA...")
-        print(f"🎯 Трейлінг-стоп: активація +{self.trailing_activation}%, крок {self.trailing_step}%, жорсткий стоп {self.hard_trail_drop}%")
+        print(f"🎯 Фіксація {self.fix_percent*100}% від максимуму, перевірка кожні {self.check_interval} сек")
         
         while self.running:
             current_time = time.time()
             
-            # Спочатку перевіряємо трейлінг-стопи для всіх відкритих позиціЙ
+            # Спочатку перевіряємо трейлінг-стопи для всіх відкритих позицій
             for symbol in list(self.positions.keys()):
                 try:
                     _, _, current_price = self.get_emas(symbol)
@@ -343,7 +365,7 @@ class ScalperBot:
                 except Exception as e:
                     print(f"Помилка для {symbol}: {e}")
             
-            time.sleep(self.check_interval)
+            time.sleep(self.check_interval)  # Перевірка кожну секунду
 
 # ===== КОМАНДИ TELEGRAM =====
 @bot.message_handler(commands=['start'])
@@ -401,7 +423,8 @@ def status_cmd(message):
             # Додаємо інформацію про трейлінг
             trailing_info = ""
             if pos.trailing_activated:
-                trailing_info = f" | трейлінг: {pos.trailing_stop:.2f}%"
+                fix_level = pos.max_pnl * scalper_instance.fix_percent
+                trailing_info = f" | фіксація: {fix_level:.2f}%"
             
             msg += (f"\n{symbol}: {'🟢 LONG' if pos.side == 'LONG' else '🔴 SHORT'}\n"
                     f"Вхід: ${round(pos.entry_price, 2)}\n"
@@ -698,7 +721,11 @@ if __name__ == '__main__':
         print(f"Моніторинг пар: {config.SYMBOLS}")
         print(f"EMA {config.EMA_FAST}/{config.EMA_SLOW} на {config.INTERVAL}")
         print(f"🆔 Bot ID: {BOT_ID}")
-        print("🎯 Трейлінг-стоп активовано!")
+        print(f"🎯 Фіксація 70% від максимуму, перевірка кожну секунду")
+        if hasattr(config, 'CHANNEL_ID') and config.CHANNEL_ID:
+            print(f"📤 Канал підключено: {config.CHANNEL_ID}")
+        else:
+            print("⚠️ Канал не налаштовано")
         print("Команди: /menu - відкрити меню")
         
         bot.infinity_polling(timeout=10, long_polling_timeout=5)

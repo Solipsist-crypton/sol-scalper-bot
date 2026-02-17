@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import telebot
 from telebot import types
 from kucoin.client import Market
@@ -7,6 +8,63 @@ import threading
 from datetime import datetime
 import config
 from database import db
+import os
+import sys
+import uuid
+import signal
+
+# 🆔 Унікальний ID цього екземпляра
+BOT_ID = str(uuid.uuid4())[:8]
+print(f"🆔 Запуск бота (ID: {BOT_ID})")
+
+# 📝 Файл для блокування
+LOCK_FILE = '/tmp/bot.lock'
+PID_FILE = '/tmp/bot.pid'
+
+# 🔒 Перевіряємо чи вже запущений інший екземпляр
+def check_single_instance():
+    # Перевіряємо lock файл
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                old_pid = f.read().strip()
+            print(f"⚠️ Бот вже запущений з PID {old_pid}")
+            print("⏹️ Зупиняємо старі процеси...")
+            
+            # Вбиваємо старі процеси
+            os.system("pkill -f 'python.*scalper_bot.py' || true")
+            time.sleep(3)
+            
+            # Видаляємо старі файли
+            os.remove(LOCK_FILE)
+            os.remove(PID_FILE)
+        except:
+            pass
+    
+    # Створюємо нові lock файли
+    with open(LOCK_FILE, 'w') as f:
+        f.write('locked')
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    print(f"✅ Екземпляр {BOT_ID} заблокував роботу")
+
+# Викликаємо перевірку
+check_single_instance()
+
+# Налаштування обробника сигналів для чистого виходу
+def signal_handler(sig, frame):
+    print(f"\n🛑 Отримано сигнал {sig}, завершуємо роботу...")
+    # Видаляємо lock файли
+    if os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+    db.close()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
 client = Market()
@@ -99,7 +157,7 @@ class ScalperBot:
         return None, None, price
     
     def close_position(self, symbol, exit_price, exit_time):
-        """Закриває позицію і рахує результат"""
+        """Закриває позицію і рахує результат з максимальним профітом"""
         if symbol in self.positions:
             pos = self.positions[symbol]
             pos.exit_price = exit_price
@@ -111,6 +169,47 @@ class ScalperBot:
             else:  # SHORT
                 pos.pnl_percent = ((pos.entry_price - exit_price) / pos.entry_price) * 100
             
+            # 🔥 РАХУЄМО МАКСИМАЛЬНИЙ ПРОФІТ ЗА УГОДУ
+            max_price = 0
+            min_price = float('inf')
+            
+            # Отримуємо свічки за період угоди
+            try:
+                kucoin_symbol = self.convert_symbol(symbol)
+                klines = client.get_kline(
+                    symbol=kucoin_symbol,
+                    kline_type='1min',
+                    start_at=int(pos.entry_time) - 60,
+                    end_at=int(exit_time) + 60
+                )
+                
+                if klines:
+                    for k in klines:
+                        high = float(k[1])  # high price
+                        low = float(k[2])   # low price
+                        if high > max_price:
+                            max_price = high
+                        if low < min_price:
+                            min_price = low
+            except Exception as e:
+                print(f"Помилка при отриманні свічок: {e}")
+                max_price = exit_price
+                min_price = exit_price
+            
+            # Рахуємо потенційний PnL
+            if pos.side == 'LONG':
+                max_pnl = ((max_price - pos.entry_price) / pos.entry_price) * 100
+                take_profit_levels = [0.1, 0.2, 0.3, 0.5, 1.0]  # Рівні TP в %
+            else:  # SHORT
+                max_pnl = ((pos.entry_price - min_price) / pos.entry_price) * 100
+                take_profit_levels = [0.1, 0.2, 0.3, 0.5, 1.0]
+            
+            # Знаходимо найближчий рівень TP
+            tp_level = 0
+            for level in take_profit_levels:
+                if max_pnl >= level:
+                    tp_level = level
+            
             hold_minutes = (exit_time - pos.entry_time) / 60
             
             trade_info = {
@@ -119,6 +218,9 @@ class ScalperBot:
                 'entry': round(pos.entry_price, 2),
                 'exit': round(exit_price, 2),
                 'pnl': round(pos.pnl_percent, 2),
+                'max_pnl': round(max_pnl, 2),
+                'take_profit': tp_level,
+                'tp_level': f"{tp_level}%",
                 'hold_minutes': round(hold_minutes, 1),
                 'entry_time': datetime.fromtimestamp(pos.entry_time).strftime('%H:%M:%S'),
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S')
@@ -145,13 +247,20 @@ class ScalperBot:
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
     def send_trade_result(self, trade):
-        """Відправляє результат угоди"""
+        """Відправляє результат угоди з максимальним профітом"""
         emoji = '✅' if trade['pnl'] > 0 else '❌'
+        
+        # Додаємо інформацію про максимальний профіт
+        max_profit_line = ""
+        if 'max_pnl' in trade:
+            max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.2f}% (міг бути {trade['take_profit']:.2f}% при TP={trade['tp_level']})\n"
+        
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
                f"Тип: {'🟢 LONG' if trade['side'] == 'LONG' else '🔴 SHORT'}\n"
                f"Вхід: ${trade['entry']} → Вихід: ${trade['exit']}\n"
                f"📊 PnL: *{trade['pnl']:+.2f}%*\n"
+               f"{max_profit_line}"
                f"⏱ Час утримання: {trade['hold_minutes']} хв\n"
                f"🕒 {trade['entry_time']} → {trade['exit_time']}")
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
@@ -548,14 +657,23 @@ def handle_text(message):
         menu_cmd(message)
 
 if __name__ == '__main__':
-    print("🤖 Telegram Scalper Bot (KuCoin) запущено...")
-    print(f"Моніторинг пар: {config.SYMBOLS}")
-    print(f"EMA {config.EMA_FAST}/{config.EMA_SLOW} на {config.INTERVAL}")
-    print("Команди: /menu - відкрити меню")
-    
     try:
-        bot.polling(none_stop=True)
+        print("🤖 Telegram Scalper Bot (KuCoin) запущено...")
+        print(f"Моніторинг пар: {config.SYMBOLS}")
+        print(f"EMA {config.EMA_FAST}/{config.EMA_SLOW} на {config.INTERVAL}")
+        print(f"🆔 Bot ID: {BOT_ID}")
+        print("Команди: /menu - відкрити меню")
+        
+        # Використовуємо infinity_polling замість звичайного
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        
     except Exception as e:
         print(f"❌ Помилка: {e}")
     finally:
+        # Видаляємо lock файли при виході
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
         db.close()
+        print("👋 Бот завершив роботу")

@@ -151,48 +151,35 @@ class ScalperBot:
         return None, None, price
     
     def check_trailing_stop(self, symbol, current_price):
-        """Перевіряє трейлінг-стоп для позиції"""
+        """Перевіряє трейлінг-стоп з фіксацією 70%"""
         if symbol not in self.positions:
             return False
-        
+
         pos = self.positions[symbol]
-        
+
         if pos.side == 'LONG':
             current_pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100
         else:
             current_pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100
-        
+
         # Оновлюємо максимальний PnL
         if current_pnl > pos.max_pnl:
-            old_max = pos.max_pnl
             pos.max_pnl = current_pnl
             print(f"📈 {symbol}: новий максимум {pos.max_pnl:.2f}%")
             
-            # Активація трейлінг-стопу при досягненні порогу
-            if pos.max_pnl >= self.trailing_activation and not pos.trailing_activated:
-                pos.trailing_activated = True
-                pos.trailing_stop = pos.max_pnl - self.trailing_step
-                print(f"🎯 {symbol}: АКТИВОВАНО трейлінг на {pos.trailing_stop:.2f}%")
-            
-            # Оновлення трейлінг-стопу при новому максимумі
-            elif pos.trailing_activated:
-                new_stop = pos.max_pnl - self.trailing_step
-                if new_stop > pos.trailing_stop:
-                    pos.trailing_stop = new_stop
-                    print(f"🔄 {symbol}: трейлінг підтягнуто до {pos.trailing_stop:.2f}%")
-        
-        # 🛡️ ЖОРСТКИЙ ТРЕЙЛІНГ: закриваємо при падінні на 0.15% від максимуму
-        if pos.trailing_activated:
-            drop_from_max = pos.max_pnl - current_pnl
-            if drop_from_max >= self.hard_trail_drop:
-                print(f"🔥 {symbol}: ЖОРСТКИЙ ТРЕЙЛІНГ! Падіння {drop_from_max:.2f}% від максимуму")
-                return True
-        
-        # Класичний трейлінг-стоп (для надійності)
+            # 🛡️ ФІКСУЄМО 70% ВІД МАКСИМУМУ (тільки якщо є профіт)
+            if pos.max_pnl >= 0.1:  # Навіть маленький профіт фіксуємо
+                fix_level = pos.max_pnl * 0.7  # Завжди 70%
+                if not pos.trailing_activated or fix_level > pos.trailing_stop:
+                    pos.trailing_activated = True
+                    pos.trailing_stop = fix_level
+                    print(f"🎯 {symbol}: фіксація 70% на {pos.trailing_stop:.2f}%")
+
+        # Перевіряємо чи спрацювала фіксація
         if pos.trailing_activated and current_pnl <= pos.trailing_stop:
-            print(f"🎯 {symbol}: ТРЕЙЛІНГ-СТОП спрацював при {current_pnl:.2f}%")
+            print(f"🔥 {symbol}: фіксація при {current_pnl:.2f}% (70% від {pos.max_pnl:.2f}% = {pos.trailing_stop:.2f}%)")
             return True
-        
+
         return False
     
     def close_position(self, symbol, exit_price, exit_time, reason="signal"):

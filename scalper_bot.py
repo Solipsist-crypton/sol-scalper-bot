@@ -132,13 +132,18 @@ class ScalperBot:
         if not ema_fast:
             return None, None, None
         
+        # Беремо РЕАЛЬНУ ціну
+        real_price = self.get_real_price(symbol)
+        if not real_price:
+            return None, None, None
+        
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         current_time = time.time()
         
         if symbol not in self.last_state:
             self.last_state[symbol] = current_state
             print(f"📊 {symbol}: початковий стан {current_state}")
-            return None, None, price
+            return None, None, real_price
         
         if current_state != self.last_state[symbol]:
             signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
@@ -149,14 +154,14 @@ class ScalperBot:
                 last_signal_time = self.last_signal[symbol]['time']
                 if signal == last_signal_type and (current_time - last_signal_time) < 30:
                     print(f"⏱️ {symbol}: ігноруємо дублікат {signal}")
-                    return None, None, price
+                    return None, None, real_price
             
             self.last_signal[symbol] = {'type': signal, 'time': current_time}
             self.last_state[symbol] = current_state
-            print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {price})")
-            return signal, current_state, price
+            print(f"🔥 {symbol}: СИГНАЛ {signal} (ціна: {real_price})")
+            return signal, current_state, real_price
         
-        return None, None, price
+        return None, None, real_price
     
     def check_trailing_stop(self, symbol, current_price):
         """Перевіряє трейлінг-стоп з фіксацією 70% і швидкою реакцією"""

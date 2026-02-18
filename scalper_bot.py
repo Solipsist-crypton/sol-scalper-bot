@@ -335,10 +335,10 @@ class ScalperBot:
             # Спочатку перевіряємо трейлінг-стопи для всіх відкритих позицій
             for symbol in list(self.positions.keys()):
                 try:
-                    _, _, current_price = self.get_emas(symbol)
-                    if current_price:
-                        if self.check_trailing_stop(symbol, current_price):
-                            self.close_position(symbol, current_price, current_time, "trailing")
+                    real_price = self.get_real_price(symbol)
+                    if real_price:
+                        if self.check_trailing_stop(symbol, real_price):
+                            self.close_position(symbol, real_price, current_time, "trailing")
                 except Exception as e:
                     print(f"Помилка трейлінгу для {symbol}: {e}")
             
@@ -412,7 +412,7 @@ def status_cmd(message):
     if scalper_instance and scalper_instance.positions:
         msg = "📊 *Активні позиції:*\n"
         for symbol, pos in scalper_instance.positions.items():
-            _, _, current_price = scalper_instance.get_emas(symbol)
+            current_price = scalper_instance.get_real_price(symbol) or 0
             if pos.side == 'LONG':
                 pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100
             else:

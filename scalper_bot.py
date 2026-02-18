@@ -117,6 +117,16 @@ class ScalperBot:
             print(f"Помилка для {symbol}: {e}")
             return None, None, None
     
+    def get_real_price(self, symbol):
+        """Отримує реальну ціну в режимі реального часу"""
+        try:
+            kucoin_symbol = self.convert_symbol(symbol)
+            ticker = client.get_ticker(kucoin_symbol)
+            return float(ticker['price'])
+        except Exception as e:
+            print(f"Помилка отримання ціни для {symbol}: {e}")
+            return None
+    
     def check_crossover(self, symbol):
         ema_fast, ema_slow, price = self.get_emas(symbol)
         if not ema_fast:

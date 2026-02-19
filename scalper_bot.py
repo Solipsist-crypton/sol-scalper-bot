@@ -162,9 +162,14 @@ class ScalperBot:
         
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         current_time = time.time()
-        
+        if ema_fast < 1 or ema_slow < 1:
+            ema_format = ".4f"
+        elif ema_fast < 10 or ema_slow < 10:
+            ema_format = ".3f"
+        else:
+            ema_format = ".2f"
         # Логуємо EMA для перевірки
-        print(f"📊 {symbol}: EMA20={ema_fast:.2f}, EMA50={ema_slow:.2f}, diff={ema_fast-ema_slow:.2f}, стан={current_state}")
+        print(f"📊 {symbol}: EMA20={ema_fast:{ema_format}}, EMA50={ema_slow:{ema_format}}, diff={ema_fast-ema_slow:{ema_format}}, стан={current_state}")
         
         # Якщо стан не завантажився з БД - зберігаємо
         if symbol not in self.last_state:

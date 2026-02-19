@@ -777,11 +777,11 @@ def crosshistory_cmd(message):
         for symbol in config.SYMBOLS:
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             
-            # Беремо 288 свічок (24 години * 12 свічок на годину = 288)
+            # Беремо 300 свічок (25 годин для запасу)
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=int(time.time()) - 24*3600,
+                start_at=int(time.time()) - 25*3600,
                 end_at=int(time.time())
             )
             
@@ -801,14 +801,18 @@ def crosshistory_cmd(message):
             crosses = []
             for i in range(1, len(df)):
                 if df['state'].iloc[i] != df['state'].iloc[i-1]:
-                    time_str = datetime.fromtimestamp(int(klines[i][0])).strftime('%H:%M %d.%m')
+                    # 🟢 ВИПРАВЛЕНО: беремо час закриття свічки + годинний пояс
+                    close_time = int(klines[i][0]) + 300  # +5 хвилин до закриття
+                    ukraine_time = close_time + 7200  # +2 години для Києва
+                    time_str = datetime.fromtimestamp(ukraine_time).strftime('%H:%M %d.%m')
+                    
                     signal = 'LONG' if df['state'].iloc[i] else 'SHORT'
                     price = df['close'].iloc[i]
                     crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
             
             msg += f"*{symbol}*\n"
             if crosses:
-                for cross in crosses[-5:]:  # Показуємо останні 5 перетинів
+                for cross in crosses[-5:]:
                     msg += f"   {cross}\n"
             else:
                 msg += "   Немає перетинів за 24 год\n"
@@ -817,6 +821,7 @@ def crosshistory_cmd(message):
         bot.reply_to(message, msg, parse_mode='Markdown')
     except Exception as e:
         bot.reply_to(message, f"Помилка: {e}")
+        
 @bot.message_handler(commands=['emastatus'])
 def emastatus_cmd(message):
     """Показує поточний стан EMA з історією"""

@@ -768,6 +768,112 @@ def callback_handler(call):
         bot.edit_message_text("❌ Скасовано", 
                             call.message.chat.id, 
                             call.message.message_id)
+@bot.message_handler(commands=['crosshistory'])
+def crosshistory_cmd(message):
+    """Показує історію перетинів EMA 20/50 за останні 24 години"""
+    try:
+        msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (24 год)*\n\n"
+        
+        for symbol in config.SYMBOLS:
+            kucoin_symbol = symbol.replace('USDT', '-USDT')
+            
+            # Беремо 288 свічок (24 години * 12 свічок на годину = 288)
+            klines = client.get_kline(
+                symbol=kucoin_symbol,
+                kline_type='5min',
+                start_at=int(time.time()) - 24*3600,
+                end_at=int(time.time())
+            )
+            
+            if not klines or len(klines) < 50:
+                continue
+            
+            # Рахуємо EMA для кожної свічки
+            closes = [float(k[2]) for k in klines]
+            df = pd.DataFrame(closes, columns=['close'])
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            
+            # Визначаємо стан для кожної свічки
+            df['state'] = df['ema20'] > df['ema50']
+            
+            # Шукаємо моменти зміни стану (перетини)
+            crosses = []
+            for i in range(1, len(df)):
+                if df['state'].iloc[i] != df['state'].iloc[i-1]:
+                    time_str = datetime.fromtimestamp(int(klines[i][0])).strftime('%H:%M %d.%m')
+                    signal = 'LONG' if df['state'].iloc[i] else 'SHORT'
+                    price = df['close'].iloc[i]
+                    crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
+            
+            msg += f"*{symbol}*\n"
+            if crosses:
+                for cross in crosses[-5:]:  # Показуємо останні 5 перетинів
+                    msg += f"   {cross}\n"
+            else:
+                msg += "   Немає перетинів за 24 год\n"
+            msg += "\n"
+        
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Помилка: {e}")
+@bot.message_handler(commands=['emastatus'])
+def emastatus_cmd(message):
+    """Показує поточний стан EMA з історією"""
+    try:
+        msg = "📊 *СТАН EMA 20/50 (поточний)*\n\n"
+        
+        for symbol in config.SYMBOLS:
+            kucoin_symbol = symbol.replace('USDT', '-USDT')
+            
+            # Беремо 100 свічок
+            klines = client.get_kline(
+                symbol=kucoin_symbol,
+                kline_type='5min',
+                start_at=int(time.time()) - 500*60,
+                end_at=int(time.time())
+            )
+            
+            if not klines or len(klines) < 60:
+                continue
+            
+            closes = [float(k[2]) for k in klines[-60:]]
+            df = pd.DataFrame(closes, columns=['close'])
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            
+            current_ema20 = df['ema20'].iloc[-1]
+            current_ema50 = df['ema50'].iloc[-1]
+            current_price = df['close'].iloc[-1]
+            
+            # Форматуємо числа
+            if current_price < 1:
+                price_fmt = ".4f"
+                ema_fmt = ".4f"
+            elif current_price < 10:
+                price_fmt = ".3f"
+                ema_fmt = ".3f"
+            else:
+                price_fmt = ".2f"
+                ema_fmt = ".2f"
+            
+            state = "🟢 LONG" if current_ema20 > current_ema50 else "🔴 SHORT"
+            diff = current_ema20 - current_ema50
+            
+            # Дивимось чи був перетин за останні 3 свічки
+            last_states = df['ema20'].iloc[-3:] > df['ema50'].iloc[-3:]
+            recent_cross = "⚠️ Щойно!" if last_states.iloc[-1] != last_states.iloc[-2] else ""
+            
+            msg += (f"*{symbol}*\n"
+                   f"   Стан: {state} {recent_cross}\n"
+                   f"   Ціна: ${current_price:{price_fmt}}\n"
+                   f"   EMA20: ${current_ema20:{ema_fmt}}\n"
+                   f"   EMA50: ${current_ema50:{ema_fmt}}\n"
+                   f"   Різниця: {diff:+.2f}\n\n")
+        
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Помилка: {e}")
 
 @bot.message_handler(commands=['menu'])
 def menu_cmd(message):
@@ -788,6 +894,8 @@ def menu_cmd(message):
         types.KeyboardButton('/cleardb'),
         types.KeyboardButton('/start'),
         types.KeyboardButton('/stop'),
+        types.KeyboardButton('/emastatus'),
+        types.KeyboardButton('/crosshistory'),
         types.KeyboardButton('/menu')
     ]
     markup.add(*buttons)

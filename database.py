@@ -1,7 +1,6 @@
 import sqlite3
 import pandas as pd
 from datetime import datetime
-import os
 
 class TradeDatabase:
     def __init__(self, db_name='trades.db'):
@@ -31,13 +30,25 @@ class TradeDatabase:
                 exit_time DATETIME NOT NULL,
                 hold_minutes REAL NOT NULL,
                 pnl_percent REAL NOT NULL,
-                hour INTEGER NOT NULL,
-                day_of_week INTEGER NOT NULL,
-                day_of_month INTEGER NOT NULL,
-                month INTEGER NOT NULL,
-                year INTEGER NOT NULL,
-                week_number INTEGER NOT NULL,
+                max_pnl REAL,
+                hour INTEGER,
+                day_of_week INTEGER,
+                day_of_month INTEGER,
+                month INTEGER,
+                year INTEGER,
+                week_number INTEGER,
+                exit_reason TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # 🆕 НОВА ТАБЛИЦЯ ДЛЯ ЗБЕРЕЖЕННЯ СТАНІВ EMA
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bot_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -53,8 +64,7 @@ class TradeDatabase:
                 entry_time DATETIME NOT NULL,
                 exit_time DATETIME NOT NULL,
                 hold_minutes REAL NOT NULL,
-                achieved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(symbol, pnl_percent, entry_time)
+                achieved_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -132,7 +142,7 @@ class TradeDatabase:
             )
         ''')
         
-        # Таблиця рекордів (топ-10)
+        # Таблиця рекордів
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,124 +154,83 @@ class TradeDatabase:
                 exit_price REAL,
                 entry_time DATETIME,
                 exit_time DATETIME,
-                achieved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(record_type, symbol, value)
+                achieved_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
         self.conn.commit()
     
+    # 🆕 НОВІ МЕТОДИ ДЛЯ РОБОТИ ЗІ СТАНАМИ
+    def save_last_state(self, symbol, state):
+        """Зберігає стан EMA для символу"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO bot_state (symbol, state, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        ''', (symbol, state))
+        self.conn.commit()
+        print(f"💾 Стан {symbol} = {state} збережено в БД")
+    
+    def load_last_state(self, symbol):
+        """Завантажує стан EMA для символу"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT state FROM bot_state WHERE symbol = ?', (symbol,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    
     def add_trade(self, trade_info):
         """Додавання угоди в БД"""
         cursor = self.conn.cursor()
-        
-        # Парсимо час
-        exit_dt = datetime.strptime(trade_info['exit_time'], '%H:%M:%S')
-        entry_dt = datetime.strptime(trade_info['entry_time'], '%H:%M:%S')
-        now = datetime.now()
-        
-        # Комбінуємо з сьогоднішньою датою
-        exit_full = now.replace(hour=exit_dt.hour, minute=exit_dt.minute, second=exit_dt.second)
-        entry_full = now.replace(hour=entry_dt.hour, minute=entry_dt.minute, second=entry_dt.second)
         
         cursor.execute('''
             INSERT INTO trades (
                 symbol, side, entry_price, exit_price,
                 entry_time, exit_time, hold_minutes,
-                pnl_percent,
-                hour, day_of_week, day_of_month, month, year, week_number
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                pnl_percent, max_pnl,
+                hour, day_of_week, day_of_month, month, year, week_number,
+                exit_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             trade_info['symbol'],
             trade_info['side'],
             trade_info['entry'],
             trade_info['exit'],
-            entry_full.strftime('%Y-%m-%d %H:%M:%S'),
-            exit_full.strftime('%Y-%m-%d %H:%M:%S'),
+            trade_info['entry_time'],
+            trade_info['exit_time'],
             trade_info['hold_minutes'],
             trade_info['pnl'],
-            exit_dt.hour,
-            exit_dt.weekday(),
-            exit_dt.day,
-            exit_dt.month,
-            exit_dt.year,
-            exit_dt.isocalendar()[1]
+            trade_info.get('max_pnl', trade_info['pnl']),
+            datetime.now().hour,
+            datetime.now().weekday(),
+            datetime.now().day,
+            datetime.now().month,
+            datetime.now().year,
+            datetime.now().isocalendar()[1],
+            trade_info.get('exit_reason', 'signal')
         ))
         
         self.conn.commit()
-        
-        # Перевіряємо чи це новий максимум/рекорд
         self.check_max_profit(trade_info)
-        self.check_records(trade_info)
         self.update_all_stats()
     
     def check_max_profit(self, trade_info):
         """Перевіряє чи є угода максимумом профіту"""
         cursor = self.conn.cursor()
         
-        # Шукаємо існуючі максимуми для цього символу
         cursor.execute('''
-            SELECT pnl_percent FROM max_profits 
-            WHERE symbol = ? 
-            ORDER BY pnl_percent DESC LIMIT 5
-        ''', (trade_info['symbol'],))
-        
-        top_profits = [row[0] for row in cursor.fetchall()]
-        
-        # Якщо це в топ-5 або це найбільший прибуток/збиток
-        if len(top_profits) < 5 or trade_info['pnl'] > min(top_profits) or trade_info['pnl'] < -5:
-            cursor.execute('''
-                INSERT OR IGNORE INTO max_profits 
-                (symbol, side, pnl_percent, entry_price, exit_price, entry_time, exit_time, hold_minutes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                trade_info['symbol'],
-                trade_info['side'],
-                trade_info['pnl'],
-                trade_info['entry'],
-                trade_info['exit'],
-                trade_info['entry_time'],
-                trade_info['exit_time'],
-                trade_info['hold_minutes']
-            ))
-            self.conn.commit()
-    
-    def check_records(self, trade_info):
-        """Перевіряє рекорди"""
-        cursor = self.conn.cursor()
-        
-        # Найбільший прибуток
-        cursor.execute('''
-            INSERT OR REPLACE INTO records (record_type, symbol, value, side, entry_price, exit_price, entry_time, exit_time)
-            SELECT 'MAX_PROFIT', ?, ?, ?, ?, ?, ?, ?
-            WHERE NOT EXISTS (
-                SELECT 1 FROM records 
-                WHERE record_type = 'MAX_PROFIT' AND symbol = ? AND value >= ?
-            ) OR ? > (SELECT value FROM records WHERE record_type = 'MAX_PROFIT' AND symbol = ?)
+            INSERT OR IGNORE INTO max_profits 
+            (symbol, side, pnl_percent, entry_price, exit_price, entry_time, exit_time, hold_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            trade_info['symbol'], trade_info['pnl'], trade_info['side'],
-            trade_info['entry'], trade_info['exit'],
-            trade_info['entry_time'], trade_info['exit_time'],
-            trade_info['symbol'], trade_info['pnl'],
-            trade_info['pnl'], trade_info['symbol']
+            trade_info['symbol'],
+            trade_info['side'],
+            trade_info['pnl'],
+            trade_info['entry'],
+            trade_info['exit'],
+            trade_info['entry_time'],
+            trade_info['exit_time'],
+            trade_info['hold_minutes']
         ))
-        
-        # Найбільший збиток
-        cursor.execute('''
-            INSERT OR REPLACE INTO records (record_type, symbol, value, side, entry_price, exit_price, entry_time, exit_time)
-            SELECT 'MAX_LOSS', ?, ?, ?, ?, ?, ?, ?
-            WHERE NOT EXISTS (
-                SELECT 1 FROM records 
-                WHERE record_type = 'MAX_LOSS' AND symbol = ? AND value <= ?
-            ) OR ? < (SELECT value FROM records WHERE record_type = 'MAX_LOSS' AND symbol = ?)
-        ''', (
-            trade_info['symbol'], trade_info['pnl'], trade_info['side'],
-            trade_info['entry'], trade_info['exit'],
-            trade_info['entry_time'], trade_info['exit_time'],
-            trade_info['symbol'], trade_info['pnl'],
-            trade_info['pnl'], trade_info['symbol']
-        ))
-        
         self.conn.commit()
     
     def update_all_stats(self):
@@ -272,7 +241,7 @@ class TradeDatabase:
         self.update_monthly_stats()
     
     def update_daily_stats(self):
-        """Оновлення денної статистики з максимумами"""
+        """Оновлення денної статистики"""
         cursor = self.conn.cursor()
         
         cursor.execute('''
@@ -301,7 +270,7 @@ class TradeDatabase:
         self.conn.commit()
     
     def update_hourly_stats(self):
-        """Оновлення годинної статистики з максимумами"""
+        """Оновлення годинної статистики"""
         cursor = self.conn.cursor()
         
         cursor.execute('''
@@ -327,7 +296,7 @@ class TradeDatabase:
         self.conn.commit()
     
     def update_weekly_stats(self):
-        """Оновлення тижневої статистики з максимумами"""
+        """Оновлення тижневої статистики"""
         cursor = self.conn.cursor()
         
         cursor.execute('''
@@ -353,7 +322,7 @@ class TradeDatabase:
         self.conn.commit()
     
     def update_monthly_stats(self):
-        """Оновлення місячної статистики з максимумами"""
+        """Оновлення місячної статистики"""
         cursor = self.conn.cursor()
         
         cursor.execute('''
@@ -378,96 +347,71 @@ class TradeDatabase:
         
         self.conn.commit()
     
-    def get_max_profits(self, symbol=None, limit=10):
+    def get_max_profits(self, limit=10):
         """Отримати топ максимумів профіту"""
-        if symbol:
-            query = '''
-                SELECT * FROM max_profits 
-                WHERE symbol = ? 
-                ORDER BY pnl_percent DESC LIMIT ?
-            '''
-            return pd.read_sql(query, self.conn, params=(symbol, limit))
-        else:
-            return pd.read_sql(f'''
-                SELECT * FROM max_profits 
-                ORDER BY pnl_percent DESC LIMIT {limit}
-            ''', self.conn)
+        return pd.read_sql(f'''
+            SELECT * FROM max_profits 
+            ORDER BY pnl_percent DESC LIMIT {limit}
+        ''', self.conn)
     
-    def get_max_losses(self, symbol=None, limit=10):
+    def get_max_losses(self, limit=10):
         """Отримати топ збитків"""
-        if symbol:
-            query = '''
-                SELECT * FROM max_profits 
-                WHERE symbol = ? 
-                ORDER BY pnl_percent ASC LIMIT ?
-            '''
-            return pd.read_sql(query, self.conn, params=(symbol, limit))
-        else:
-            return pd.read_sql(f'''
-                SELECT * FROM max_profits 
-                ORDER BY pnl_percent ASC LIMIT {limit}
-            ''', self.conn)
+        return pd.read_sql(f'''
+            SELECT * FROM max_profits 
+            ORDER BY pnl_percent ASC LIMIT {limit}
+        ''', self.conn)
     
-    def get_records(self, symbol=None):
+    def get_records(self):
         """Отримати рекорди"""
-        if symbol:
-            query = "SELECT * FROM records WHERE symbol = ? ORDER BY record_type"
-            return pd.read_sql(query, self.conn, params=(symbol,))
-        else:
-            return pd.read_sql("SELECT * FROM records ORDER BY record_type", self.conn)
+        return pd.read_sql('''
+            SELECT * FROM records 
+            ORDER BY record_type, value DESC
+        ''', self.conn)
     
-    def get_trades(self, symbol=None, limit=100):
+    def get_trades(self, limit=100):
         """Отримати список угод"""
-        if symbol:
-            query = "SELECT * FROM trades WHERE symbol = ? ORDER BY exit_time DESC LIMIT ?"
-            return pd.read_sql(query, self.conn, params=(symbol, limit))
-        else:
-            return pd.read_sql(f"SELECT * FROM trades ORDER BY exit_time DESC LIMIT {limit}", self.conn)
+        return pd.read_sql(f'''
+            SELECT * FROM trades 
+            ORDER BY exit_time DESC LIMIT {limit}
+        ''', self.conn)
     
-    def get_daily_stats(self, symbol=None, days=30):
+    def get_daily_stats(self, days=30):
         """Отримати денну статистику"""
-        if symbol:
-            query = "SELECT * FROM daily_stats WHERE symbol = ? ORDER BY date DESC LIMIT ?"
-            return pd.read_sql(query, self.conn, params=(symbol, days))
-        else:
-            return pd.read_sql(f"SELECT * FROM daily_stats ORDER BY date DESC LIMIT {days}", self.conn)
+        return pd.read_sql(f'''
+            SELECT * FROM daily_stats 
+            ORDER BY date DESC LIMIT {days}
+        ''', self.conn)
     
-    def get_hourly_stats(self, symbol=None):
+    def get_hourly_stats(self):
         """Отримати годинну статистику"""
-        if symbol:
-            query = "SELECT * FROM hourly_stats WHERE symbol = ? ORDER BY hour"
-            return pd.read_sql(query, self.conn, params=(symbol,))
-        else:
-            return pd.read_sql("SELECT * FROM hourly_stats ORDER BY hour", self.conn)
+        return pd.read_sql('''
+            SELECT * FROM hourly_stats 
+            ORDER BY hour
+        ''', self.conn)
     
-    def get_weekly_stats(self, symbol=None, weeks=12):
+    def get_weekly_stats(self, weeks=12):
         """Отримати тижневу статистику"""
-        if symbol:
-            query = "SELECT * FROM weekly_stats WHERE symbol = ? ORDER BY year DESC, week DESC LIMIT ?"
-            return pd.read_sql(query, self.conn, params=(symbol, weeks))
-        else:
-            return pd.read_sql(f"SELECT * FROM weekly_stats ORDER BY year DESC, week DESC LIMIT {weeks}", self.conn)
+        return pd.read_sql(f'''
+            SELECT * FROM weekly_stats 
+            ORDER BY year DESC, week DESC LIMIT {weeks}
+        ''', self.conn)
     
-    def get_monthly_stats(self, symbol=None, months=12):
+    def get_monthly_stats(self, months=12):
         """Отримати місячну статистику"""
-        if symbol:
-            query = "SELECT * FROM monthly_stats WHERE symbol = ? ORDER BY year DESC, month DESC LIMIT ?"
-            return pd.read_sql(query, self.conn, params=(symbol, months))
-        else:
-            return pd.read_sql(f"SELECT * FROM monthly_stats ORDER BY year DESC, month DESC LIMIT {months}", self.conn)
+        return pd.read_sql(f'''
+            SELECT * FROM monthly_stats 
+            ORDER BY year DESC, month DESC LIMIT {months}
+        ''', self.conn)
     
-    def get_detailed_analysis(self, symbol=None):
-        """Детальний аналіз з максимумами"""
-        if symbol:
-            trades_df = pd.read_sql("SELECT * FROM trades WHERE symbol = ?", self.conn, params=(symbol,))
-        else:
-            trades_df = pd.read_sql("SELECT * FROM trades", self.conn)
+    def get_detailed_analysis(self):
+        """Детальний аналіз"""
+        trades_df = pd.read_sql("SELECT * FROM trades", self.conn)
         
         if len(trades_df) == 0:
             return None
         
         # Отримуємо рекорди
-        records = self.get_records(symbol)
+        records = self.get_records()
         
         analysis = {
             'total_trades': len(trades_df),
@@ -493,10 +437,8 @@ class TradeDatabase:
         return analysis
     
     def clear_all_data(self):
-        """Очистити всі дані (тільки для тестування)"""
+        """Очистити всі дані"""
         cursor = self.conn.cursor()
-    
-        # Видаляємо всі дані з таблиць
         cursor.execute("DELETE FROM trades")
         cursor.execute("DELETE FROM max_profits")
         cursor.execute("DELETE FROM records")
@@ -504,11 +446,10 @@ class TradeDatabase:
         cursor.execute("DELETE FROM hourly_stats")
         cursor.execute("DELETE FROM weekly_stats")
         cursor.execute("DELETE FROM monthly_stats")
-    
+        cursor.execute("DELETE FROM bot_state")  # Очищаємо також стани
         self.conn.commit()
         print("🗑️ Базу даних очищено")
-
-
+    
     def close(self):
         """Закриття з'єднання"""
         if self.conn:

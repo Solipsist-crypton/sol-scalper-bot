@@ -403,7 +403,16 @@ def price_cmd(message):
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             ticker = client.get_ticker(kucoin_symbol)
             price = float(ticker['price'])
-            msg += f"\n{symbol}: ${round(price, 2)}"
+            
+            # 🟢 ДИНАМІЧНЕ ФОРМАТУВАННЯ
+            if price < 1:
+                price_str = f"{price:.4f}"  # 4 знаки для монет < 1$
+            elif price < 10:
+                price_str = f"{price:.3f}"  # 3 знаки для монет 1-10$
+            else:
+                price_str = f"{price:.2f}"  # 2 знаки для інших
+            
+            msg += f"\n{symbol}: ${price_str}"
         bot.reply_to(message, msg, parse_mode='Markdown')
     except Exception as e:
         bot.reply_to(message, f"Помилка: {e}")

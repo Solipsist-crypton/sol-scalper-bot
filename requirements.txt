@@ -1,5 +1,5 @@
 pyTelegramBotAPI==4.14.0
-kucoin-python==1.0.26
+python-binance==1.0.19
 pandas==2.2.3
 numpy==1.26.4
 requests==2.31.0

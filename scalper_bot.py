@@ -109,29 +109,44 @@ class ScalperBot:
     def get_emas(self, symbol):
         try:
             kucoin_symbol = self.convert_symbol(symbol)
+        
+            # Беремо 100 свічок для надійності
+            now = int(time.time())
+            current_minute = datetime.now().minute
+            last_5min_candle = now - (current_minute % 5 * 60) - (now % 60)
+        
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=int(time.time()) - 500*60,
-                end_at=int(time.time())
+                start_at=last_5min_candle - 500*60,
+                end_at=last_5min_candle
             )
-            
+        
             if not klines:
                 print(f"⚠️ Немає даних для {symbol}")
                 return None, None, None
-            
+        
             if len(klines) < 60:
-                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок (потрібно 60+)")
+                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок")
                 return None, None, None
-            
+        
+            # 🟢 БЕРЕМО ОСТАННІ 60 СВІЧОК
+            klines = klines[-60:]
             closes = [float(k[2]) for k in klines]
             df = pd.DataFrame(closes, columns=['close'])
-            
+        
+            # 🟢 ПЕРЕВІРКА ДОВЖИНИ
+            if len(df) < 50:
+                print(f"⚠️ Недостатньо даних для EMA 50: {len(df)}")
+                return None, None, None
+        
             ema_fast = df['close'].ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
-            current_price = closes[-1]
-            
-            return ema_fast, ema_slow, current_price
+        
+            # 🟢 ЛОГУЄМО ДЛЯ ПЕРЕВІРКИ
+            print(f"📊 {symbol}: дані: {len(df)} свічок, EMA20={ema_fast:.2f}, EMA50={ema_slow:.2f}")
+        
+            return ema_fast, ema_slow, closes[-1]
         except Exception as e:
             print(f"Помилка для {symbol}: {e}")
             return None, None, None

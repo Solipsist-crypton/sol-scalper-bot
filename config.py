@@ -7,7 +7,7 @@ CHAT_ID = os.getenv('CHAT_ID')
 CHANNEL_ID = -1003877678504  # Додайте цей рядок
 
 # Торгові налаштування
-SYMBOLS = ['SOLUSDT', 'BTCUSDT', 'ETHUSDT', 'ARBUSDT', 'RNDRUSDT', 'LINKUSDT']
+SYMBOLS = ['SOLUSDT', 'BTCUSDT', 'ETHUSDT', 'ARBUSDT', 'LINKUSDT']
 INTERVAL = '5m'
 EMA_FAST = 20
 EMA_SLOW = 50

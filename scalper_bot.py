@@ -59,7 +59,10 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
-client = Market()
+client = Client(
+    api_key=config.EXCHANGE_API_KEY,
+    api_secret=config.EXCHANGE_API_SECRET
+)
 
 # Глобальний екземпляр бота
 scalper_instance = None
@@ -197,44 +200,53 @@ class ScalperBot:
             pos = self.positions[symbol]
             pos.exit_price = exit_price
             pos.exit_time = exit_time
-            
+        
             if pos.side == 'LONG':
                 pos.pnl_percent = ((exit_price - pos.entry_price) / pos.entry_price) * 100
             else:
                 pos.pnl_percent = ((pos.entry_price - exit_price) / pos.entry_price) * 100
-            
-            # Рахуємо максимальний профіт за угоду (для статистики)
+        
+            # 🔥 Рахуємо максимальний профіт за угоду (для статистики)
             max_price = 0
             min_price = float('inf')
-            
+        
             try:
-                kucoin_symbol = self.convert_symbol(symbol)
-                klines = client.get_kline(
-                    symbol=kucoin_symbol,
-                    kline_type='5min',
-                    start_at=int(pos.entry_time) - 60,
-                    end_at=int(exit_time) + 60
+                # 🟢 BINANCE ВЕРСІЯ - використовуємо get_klines
+                klines = client.get_klines(
+                    symbol=symbol,
+                    interval=Client.KLINE_INTERVAL_5MINUTE,
+                    limit=100  # Беремо 100 свічок для аналізу
                 )
-                
+            
                 if klines:
                     for k in klines:
-                        high = float(k[1])
-                        low = float(k[2])
+                        # Binance формат свічки:
+                        # k[0] = timestamp відкриття
+                        # k[1] = open
+                        # k[2] = high  <-- ЦЕ НАМ ПОТРІБНО
+                        # k[3] = low   <-- ЦЕ НАМ ПОТРІБНО
+                        # k[4] = close
+                        # k[5] = volume
+                        high = float(k[2])  # максимальна ціна
+                        low = float(k[3])   # мінімальна ціна
+                    
                         if high > max_price:
                             max_price = high
                         if low < min_price:
                             min_price = low
-            except:
+            except Exception as e:
+                print(f"❌ Помилка отримання свічок: {e}")
                 max_price = exit_price
                 min_price = exit_price
-            
+        
+            # Рахуємо максимальний PnL в процентах
             if pos.side == 'LONG':
                 max_pnl = ((max_price - pos.entry_price) / pos.entry_price) * 100
-            else:
+            else:  # SHORT
                 max_pnl = ((pos.entry_price - min_price) / pos.entry_price) * 100
-            
+        
             hold_minutes = (exit_time - pos.entry_time) / 60
-            
+        
             trade_info = {
                 'symbol': symbol,
                 'side': pos.side,
@@ -247,16 +259,16 @@ class ScalperBot:
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S'),
                 'exit_reason': reason
             }
-            
+        
             # Зберігаємо в БД
             db.add_trade(trade_info)
-            
+        
             # 📤 Відправляємо в канал
             self.send_to_channel(trade_info)
-            
+        
             # Відправляємо результат
             self.send_trade_result(trade_info, reason)
-            
+        
             del self.positions[symbol]
             return trade_info
         return None
@@ -735,56 +747,45 @@ def callback_handler(call):
                             call.message.message_id)
 @bot.message_handler(commands=['crosshistory'])
 def crosshistory_cmd(message):
-    """Показує історію перетинів EMA 20/50 за останні 7 днів (або 48 годин)"""
+    """Показує історію перетинів EMA 20/50 за останні 7 днів"""
     try:
         msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (7 днів)*\n\n"
         
         for symbol in config.SYMBOLS:
-            kucoin_symbol = symbol.replace('USDT', '-USDT')
-            
-            # Беремо 2000 свічок (≈7 днів) для достатньої історії
-            end_time = int(time.time())
-            start_time = end_time - 7*24*3600  # 7 днів тому
-            klines = client.get_kline(
-                symbol=kucoin_symbol,
-                kline_type='5min',
-                start_at=start_time,
-                end_at=end_time
+            # 🟢 Binance версія
+            klines = client.get_klines(
+                symbol=symbol,
+                interval=Client.KLINE_INTERVAL_5MINUTE,
+                limit=1000
             )
             
-            if not klines or len(klines) < 200:  # мінімум 200 свічок для стабільності
+            if not klines or len(klines) < 200:
                 msg += f"*{symbol}* – недостатньо даних\n\n"
                 continue
             
-            # Отримуємо ціни закриття
-            closes = [float(k[2]) for k in klines]
-            
-            # Розраховуємо EMA з min_periods, щоб уникнути спотворень
+            closes = [float(k[4]) for k in klines]  # Binance: індекс 4 = close
             df = pd.DataFrame(closes, columns=['close'])
-            df['ema20'] = df['close'].ewm(span=20, adjust=False, min_periods=20).mean()
-            df['ema50'] = df['close'].ewm(span=50, adjust=False, min_periods=50).mean()
-            
-            # Визначаємо стан тільки там, де обидва EMA не NaN
-            df['state'] = (df['ema20'] > df['ema50']) & df['ema20'].notna() & df['ema50'].notna()
+            df['ema20'] = df['close'].ewm(span=20).mean()
+            df['ema50'] = df['close'].ewm(span=50).mean()
             
             # Шукаємо перетини
             crosses = []
             for i in range(1, len(df)):
-                if pd.notna(df['ema20'].iloc[i]) and pd.notna(df['ema50'].iloc[i]) and \
-                   pd.notna(df['ema20'].iloc[i-1]) and pd.notna(df['ema50'].iloc[i-1]):
-                    if df['state'].iloc[i] != df['state'].iloc[i-1]:
-                        # Час закриття свічки
-                        close_time = int(klines[i][0]) + 300
-                        # Конвертуємо в локальний (Київ UTC+2)
-                        local_time = close_time + 7200
-                        time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
-                        signal = 'LONG' if df['state'].iloc[i] else 'SHORT'
-                        price = df['close'].iloc[i]
-                        crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
+                prev_state = df['ema20'].iloc[i-1] > df['ema50'].iloc[i-1]
+                curr_state = df['ema20'].iloc[i] > df['ema50'].iloc[i]
+                
+                if prev_state != curr_state:
+                    # Час закриття свічки (Binance дає timestamp в мілісекундах)
+                    close_time = klines[i][0] / 1000  # конвертуємо в секунди
+                    local_time = close_time + 7200  # +2 години для Києва
+                    time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
+                    
+                    signal = 'LONG' if curr_state else 'SHORT'
+                    price = df['close'].iloc[i]
+                    crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
             
             msg += f"*{symbol}*\n"
             if crosses:
-                # Показуємо останні 10 перетинів
                 for cross in crosses[-10:]:
                     msg += f"   {cross}\n"
             else:

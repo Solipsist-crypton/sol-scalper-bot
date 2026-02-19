@@ -110,34 +110,27 @@ class ScalperBot:
         try:
             kucoin_symbol = self.convert_symbol(symbol)
         
-            # 🟢 Беремо ТІЛЬКИ закриті свічки (до останньої повної 5хв свічки)
-            now = int(time.time())
-            current_minute = datetime.now().minute
-            # Остання повна 5хв свічка
-            last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
-        
+            # Беремо 500 свічок (достатньо для стабільних EMA)
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=last_full_candle - 1000*60,  # 1000 хвилин = 200 свічок
-                end_at=last_full_candle
+                start_at=int(time.time()) - 500*300,  # 500 свічок * 5 хв = 2500 хвилин тому
+                end_at=int(time.time())  # остання закрита свічка (API не повертає незакриті)
             )
         
-            if not klines or len(klines) < 100:  # Потрібно більше даних для стабільних EMA
-                print(f"⚠️ Недостатньо даних для {symbol}")
+            if not klines or len(klines) < 100:
+                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines) if klines else 0}")
                 return None, None, None
         
-            # Беремо останні 100 свічок
-            klines = klines[-100:]
-            closes = [float(k[2]) for k in klines]
-        
-            # 🟢 НЕ замінюємо останню ціну! Використовуємо тільки закриті свічки
+            # Беремо останні 300 свічок для швидкодії (але достатньо для точності)
+            closes = [float(k[2]) for k in klines[-300:]]
             df = pd.DataFrame(closes, columns=['close'])
         
+            # Використовуємо min_periods для стабільності
             ema_fast = df['close'].ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
         
-            # Окремо беремо реальну ціну для входу/виходу
+            # Поточна ціна для входу (беремо з ticker)
             real_price = self.get_real_price(symbol)
         
             return ema_fast, ema_slow, real_price or closes[-1]
@@ -365,48 +358,34 @@ class ScalperBot:
     def monitor_loop(self):
         print("🤖 Моніторинг запущено. Чекаємо на перетин EMA 20/50 на 5хв...")
         print(f"📊 Трейлінг-стоп: ВИМКНЕНО (тільки сигнали EMA)")
-        
-        last_candle_check = 0
-        
+    
         while self.running:
             current_time = time.time()
-            
-            # 🟢 ПЕРЕВІРКА НОВОЇ СВІЧКИ (кожні 5 хвилин)
-            if current_time - last_candle_check > 300:  # 5 хвилин
-                print(f"🕐 Оновлюємо EMA дані...")
-                # Очищаємо стани щоб примусово перерахувати EMA
-                for symbol in config.SYMBOLS:
-                    if symbol in self.last_state:
-                        # Тимчасово видаляємо щоб отримати новий стан
-                        old_state = self.last_state[symbol]
-                        del self.last_state[symbol]
-                        print(f"🔄 {symbol}: перерахунок EMA")
-                last_candle_check = current_time
-            
-            # Перевіряємо сигнали EMA для нових угод
+        
+            # Перевіряємо сигнали EMA для всіх монет
             for symbol in config.SYMBOLS:
                 try:
                     signal, state, price = self.check_crossover(symbol)
-                    
+                
                     if signal:
                         if symbol in self.positions:
                             current_pos = self.positions[symbol]
-                            
+                        
                             if (current_pos.side == 'LONG' and signal == 'SHORT') or \
-                               (current_pos.side == 'SHORT' and signal == 'LONG'):
+                                (current_pos.side == 'SHORT' and signal == 'LONG'):
                                 self.close_position(symbol, price, current_time, "signal")
                                 time.sleep(1)
                                 self.open_position(symbol, signal, price, current_time)
                             else:
                                 print(f"⚠️ {symbol}: ігноруємо {signal} - вже є {current_pos.side}")
-                        
+                    
                         else:
                             self.open_position(symbol, signal, price, current_time)
-                    
+                
                 except Exception as e:
                     print(f"Помилка для {symbol}: {e}")
-            
-            time.sleep(self.check_interval)
+        
+        time.sleep(self.check_interval)
 
 # ===== КОМАНДИ TELEGRAM =====
 @bot.message_handler(commands=['start'])
@@ -770,41 +749,43 @@ def callback_handler(call):
                             call.message.message_id)
 @bot.message_handler(commands=['crosshistory'])
 def crosshistory_cmd(message):
-    """Показує історію перетинів EMA 20/50 за останні 24 години"""
     try:
         msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (24 год)*\n\n"
         
         for symbol in config.SYMBOLS:
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             
-            # Беремо 300 свічок (25 годин для запасу)
+            # Беремо 500 свічок (близько 42 годин) для стабільних EMA
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=int(time.time()) - 25*3600,
+                start_at=int(time.time()) - 48*3600,  # 48 годин
                 end_at=int(time.time())
             )
             
-            if not klines or len(klines) < 50:
+            if not klines or len(klines) < 200:
                 continue
             
-            # Рахуємо EMA для кожної свічки
+            # Формуємо DataFrame з цінами закриття
             closes = [float(k[2]) for k in klines]
             df = pd.DataFrame(closes, columns=['close'])
-            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
             
-            # Визначаємо стан для кожної свічки
+            # Розраховуємо EMA з min_periods
+            df['ema20'] = df['close'].ewm(span=20, adjust=False, min_periods=20).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False, min_periods=50).mean()
+            
+            # Визначаємо стан
             df['state'] = df['ema20'] > df['ema50']
             
-            # Шукаємо моменти зміни стану (перетини)
+            # Шукаємо перетини
             crosses = []
             for i in range(1, len(df)):
                 if df['state'].iloc[i] != df['state'].iloc[i-1]:
-                    # 🟢 ВИПРАВЛЕНО: беремо час закриття свічки + годинний пояс
-                    close_time = int(klines[i][0]) + 300  # +5 хвилин до закриття
-                    ukraine_time = close_time + 7200  # +2 години для Києва
-                    time_str = datetime.fromtimestamp(ukraine_time).strftime('%H:%M %d.%m')
+                    # Час закриття свічки = час відкриття + 5 хв
+                    close_time = int(klines[i][0]) + 300
+                    # Конвертуємо в локальний час (Київ UTC+2)
+                    local_time = close_time + 7200
+                    time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
                     
                     signal = 'LONG' if df['state'].iloc[i] else 'SHORT'
                     price = df['close'].iloc[i]
@@ -812,10 +793,10 @@ def crosshistory_cmd(message):
             
             msg += f"*{symbol}*\n"
             if crosses:
-                for cross in crosses[-5:]:
+                for cross in crosses[-5:]:  # останні 5 перетинів
                     msg += f"   {cross}\n"
             else:
-                msg += "   Немає перетинів за 24 год\n"
+                msg += "   Немає перетинів за 48 год\n"
             msg += "\n"
         
         bot.reply_to(message, msg, parse_mode='Markdown')

@@ -110,10 +110,17 @@ class ScalperBot:
         try:
             kucoin_symbol = self.convert_symbol(symbol)
         
-            # Беремо 100 свічок для надійності
+            # 🟢 РАХУЄМО ЧАС КОЖЕН РАЗ
             now = int(time.time())
             current_minute = datetime.now().minute
+            # Остання ЗАКРИТА 5хв свічка
             last_5min_candle = now - (current_minute % 5 * 60) - (now % 60)
+        
+            # Якщо минуло менше 5 хвилин від початку години, беремо попередню свічку
+            if current_minute % 5 == 0 and now % 60 < 60:
+                last_5min_candle = last_5min_candle - 300
+        
+            print(f"🕐 Час: {datetime.now().strftime('%H:%M:%S')}, остання 5хв свічка: {datetime.fromtimestamp(last_5min_candle).strftime('%H:%M')}")
         
             klines = client.get_kline(
                 symbol=kucoin_symbol,
@@ -122,31 +129,24 @@ class ScalperBot:
                 end_at=last_5min_candle
             )
         
-            if not klines:
-                print(f"⚠️ Немає даних для {symbol}")
+            if not klines or len(klines) < 60:
+                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines) if klines else 0}")
                 return None, None, None
         
-            if len(klines) < 60:
-                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок")
-                return None, None, None
-        
-            # 🟢 БЕРЕМО ОСТАННІ 60 СВІЧОК
+            # Беремо останні 60 свічок
             klines = klines[-60:]
             closes = [float(k[2]) for k in klines]
             df = pd.DataFrame(closes, columns=['close'])
         
-            # 🟢 ПЕРЕВІРКА ДОВЖИНИ
-            if len(df) < 50:
-                print(f"⚠️ Недостатньо даних для EMA 50: {len(df)}")
-                return None, None, None
-        
             ema_fast = df['close'].ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
+            current_price = closes[-1]
         
-            # 🟢 ЛОГУЄМО ДЛЯ ПЕРЕВІРКИ
-            print(f"📊 {symbol}: дані: {len(df)} свічок, EMA20={ema_fast:.2f}, EMA50={ema_slow:.2f}")
+            # 🟢 ЛОГУЄМО ЧАС ОСТАННЬОЇ СВІЧКИ
+            last_candle_time = datetime.fromtimestamp(int(klines[-1][0])).strftime('%H:%M')
+            print(f"📊 {symbol}: свічка {last_candle_time}, EMA20={ema_fast:.2f}, EMA50={ema_slow:.2f}")
         
-            return ema_fast, ema_slow, closes[-1]
+            return ema_fast, ema_slow, current_price
         except Exception as e:
             print(f"Помилка для {symbol}: {e}")
             return None, None, None
@@ -443,12 +443,17 @@ def stop_cmd(message):
 @bot.message_handler(commands=['price'])
 def price_cmd(message):
     try:
-        msg = "💰 *Поточні ціни (KuCoin):*\n"
+        msg = "💰 *Поточні ціни та EMA (KuCoin):*\n"
         for symbol in config.SYMBOLS:
+            # Отримуємо EMA
+            ema_fast, ema_slow, _ = scalper_instance.get_emas(symbol) if scalper_instance else (None, None, None)
+            
+            # Отримуємо реальну ціну
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             ticker = client.get_ticker(kucoin_symbol)
             price = float(ticker['price'])
             
+            # Форматуємо ціну
             if price < 1:
                 price_str = f"{price:.4f}"
             elif price < 10:
@@ -456,7 +461,23 @@ def price_cmd(message):
             else:
                 price_str = f"{price:.2f}"
             
-            msg += f"\n{symbol}: ${price_str}"
+            # Форматуємо EMA
+            if ema_fast and ema_slow:
+                if ema_fast < 1 or ema_slow < 1:
+                    ema_format = ".4f"
+                elif ema_fast < 10 or ema_slow < 10:
+                    ema_format = ".3f"
+                else:
+                    ema_format = ".2f"
+                
+                ema_fast_str = f"{ema_fast:{ema_format}}"
+                ema_slow_str = f"{ema_slow:{ema_format}}"
+                diff = ema_fast - ema_slow
+                ema_line = f"\n   EMA20: ${ema_fast_str} | EMA50: ${ema_slow_str} | diff: {diff:+.2f}"
+            else:
+                ema_line = "\n   EMA: немає даних"
+            
+            msg += f"\n{symbol}: ${price_str}{ema_line}"
         bot.reply_to(message, msg, parse_mode='Markdown')
     except Exception as e:
         bot.reply_to(message, f"Помилка: {e}")

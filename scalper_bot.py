@@ -279,8 +279,11 @@ class ScalperBot:
         emoji = '✅' if trade['pnl'] > 0 else '❌'
         reason_emoji = "📊" if reason == "signal" else "🎯"
         reason_text = "сигнал EMA" if reason == "signal" else "трейлінг-стоп"
-        
-        max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.2f}%\n"
+        if trade['entry'] < 1 or trade['exit'] < 1:
+            price_format = ".4f"  # 4 знаки для монет < 1$
+        else:
+            price_format = ".2f"  # 2 знаки для інших
+        max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.{price_format}}%\n"
         
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
@@ -298,7 +301,11 @@ class ScalperBot:
         try:
             if not hasattr(config, 'CHANNEL_ID') or not config.CHANNEL_ID:
                 return
-            
+            if trade_info['entry'] < 1 or trade_info['exit'] < 1:
+                price_format = ".4f"
+            else:
+                price_format = ".2f"
+                
             emoji = '✅' if trade_info['pnl'] > 0 else '❌'
             reason_emoji = "🎯" if trade_info.get('exit_reason') == 'trailing' else "📊"
             

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import telebot
 from telebot import types
-from kucoin.client import Market
+from binance.client import Client
 import pandas as pd
 import time
 import threading
@@ -104,51 +104,37 @@ class ScalperBot:
         db.save_last_state(symbol, state)
     
     def convert_symbol(self, symbol):
-        return symbol.replace('USDT', '-USDT')
+        return symbol  # Binance використовує SOLUSDT, не SOL-USDT
     
     def get_emas(self, symbol):
         try:
-            kucoin_symbol = self.convert_symbol(symbol)
-        
-            # Беремо 500 свічок (достатньо для стабільних EMA)
-            klines = client.get_kline(
-                symbol=kucoin_symbol,
-                kline_type='5min',
-                start_at=int(time.time()) - 500*300,  # 500 свічок * 5 хв = 2500 хвилин тому
-                end_at=int(time.time())  # остання закрита свічка (API не повертає незакриті)
+            # Отримуємо свічки з Binance
+            klines = client.get_klines(
+                symbol=symbol,
+                interval=Client.KLINE_INTERVAL_5MINUTE,
+                limit=500  # 500 свічок достатньо
             )
         
             if not klines or len(klines) < 100:
-                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines) if klines else 0}")
                 return None, None, None
         
-            # Беремо останні 300 свічок для швидкодії (але достатньо для точності)
-            closes = [float(k[2]) for k in klines[-300:]]
+            closes = [float(k[4]) for k in klines]  # ціна закриття
             df = pd.DataFrame(closes, columns=['close'])
         
-            # Використовуємо min_periods для стабільності
-            ema_fast = df['close'].ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
-            ema_slow = df['close'].ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
+            ema_fast = df['close'].ewm(span=20).mean().iloc[-1]
+            ema_slow = df['close'].ewm(span=50).mean().iloc[-1]
         
-            # Поточна ціна для входу (беремо з ticker)
-            real_price = self.get_real_price(symbol)
-        
-            return ema_fast, ema_slow, real_price or closes[-1]
+            return ema_fast, ema_slow, closes[-1]
         except Exception as e:
-            print(f"Помилка для {symbol}: {e}")
+            print(f"Помилка {symbol}: {e}")
             return None, None, None
     
     def get_real_price(self, symbol):
-        """Отримує реальну ціну в режимі реального часу"""
         try:
-            kucoin_symbol = self.convert_symbol(symbol)
-            ticker = client.get_ticker(kucoin_symbol)
-            if not ticker or 'price' not in ticker:
-                print(f"⚠️ Немає ціни для {symbol}")
-                return None
+            ticker = client.get_symbol_ticker(symbol=symbol)
             return float(ticker['price'])
         except Exception as e:
-            print(f"Помилка отримання ціни для {symbol}: {e}")
+            print(f"Помилка ціни {symbol}: {e}")
             return None
     
     def check_crossover(self, symbol):

@@ -97,7 +97,7 @@ class ScalperBot:
             kucoin_symbol = self.convert_symbol(symbol)
             klines = client.get_kline(
                 symbol=kucoin_symbol,
-                kline_type='1min',
+                kline_type='5min',
                 start_at=int(time.time()) - 150*60,
                 end_at=int(time.time())
             )

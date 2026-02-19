@@ -112,7 +112,7 @@ class ScalperBot:
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',  # ✅ ВИПРАВЛЕНО: 5хв свічки
-                start_at=int(time.time()) - 150*60,
+                start_at=int(time.time()) - 500*60,
                 end_at=int(time.time())
             )
             

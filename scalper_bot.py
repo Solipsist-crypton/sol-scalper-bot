@@ -115,8 +115,12 @@ class ScalperBot:
                 start_at=int(time.time()) - 500*60,
                 end_at=int(time.time())
             )
+            if not klines:
+                print(f"⚠️ Немає даних для {symbol}")
+                return None, None, None
             
-            if not klines or len(klines) < 50:  # Потрібно мінімум 50 свічок для EMA 50
+            if not klines or len(klines) < 60:  # Потрібно мінімум 50 свічок для EMA 50
+                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок (потрібно 60+)")
                 return None, None, None
             
             closes = [float(k[2]) for k in klines]

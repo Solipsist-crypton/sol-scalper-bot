@@ -111,15 +111,16 @@ class ScalperBot:
             kucoin_symbol = self.convert_symbol(symbol)
             klines = client.get_kline(
                 symbol=kucoin_symbol,
-                kline_type='5min',  # ✅ ВИПРАВЛЕНО: 5хв свічки
+                kline_type='5min',
                 start_at=int(time.time()) - 500*60,
                 end_at=int(time.time())
             )
+            
             if not klines:
                 print(f"⚠️ Немає даних для {symbol}")
                 return None, None, None
             
-            if not klines or len(klines) < 60:  # Потрібно мінімум 50 свічок для EMA 50
+            if len(klines) < 60:
                 print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок (потрібно 60+)")
                 return None, None, None
             
@@ -140,6 +141,9 @@ class ScalperBot:
         try:
             kucoin_symbol = self.convert_symbol(symbol)
             ticker = client.get_ticker(kucoin_symbol)
+            if not ticker or 'price' not in ticker:
+                print(f"⚠️ Немає ціни для {symbol}")
+                return None
             return float(ticker['price'])
         except Exception as e:
             print(f"Помилка отримання ціни для {symbol}: {e}")
@@ -193,7 +197,7 @@ class ScalperBot:
     
     def check_trailing_stop(self, symbol, current_price):
         """Трейлінг-стоп (ТИМЧАСОВО ВІДКЛЮЧЕНО)"""
-        return False  # Завжди повертає False - трейлер не працює
+        return False
     
     def close_position(self, symbol, exit_price, exit_time, reason="signal"):
         if symbol in self.positions:
@@ -241,11 +245,11 @@ class ScalperBot:
             trade_info = {
                 'symbol': symbol,
                 'side': pos.side,
-                'entry': round(pos.entry_price, 2),
-                'exit': round(exit_price, 2),
-                'pnl': round(pos.pnl_percent, 2),
-                'max_pnl': round(max_pnl, 2),
-                'hold_minutes': round(hold_minutes, 1),
+                'entry': pos.entry_price,
+                'exit': exit_price,
+                'pnl': pos.pnl_percent,
+                'max_pnl': max_pnl,
+                'hold_minutes': hold_minutes,
                 'entry_time': datetime.fromtimestamp(pos.entry_time).strftime('%H:%M:%S'),
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S'),
                 'exit_reason': reason
@@ -254,7 +258,7 @@ class ScalperBot:
             # Зберігаємо в БД
             db.add_trade(trade_info)
             
-            # 📤 Відправляємо в канал (якщо налаштовано)
+            # 📤 Відправляємо в канал
             self.send_to_channel(trade_info)
             
             # Відправляємо результат
@@ -268,10 +272,18 @@ class ScalperBot:
         self.positions[symbol] = Position(symbol, side, price, current_time)
         self.last_trade_time[symbol] = current_time
         
+        # Форматуємо ціну для відображення
+        if price < 1:
+            price_str = f"{price:.4f}"
+        elif price < 10:
+            price_str = f"{price:.3f}"
+        else:
+            price_str = f"{price:.2f}"
+        
         msg = (f"🆓 *НОВА ПОЗИЦІЯ*\n"
                f"Монета: {symbol}\n"
                f"Напрямок: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
-               f"Ціна входу: ${round(price, 2)}\n"
+               f"Ціна входу: ${price_str}\n"
                f"Час: {datetime.fromtimestamp(current_time).strftime('%H:%M:%S')}")
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
@@ -279,19 +291,19 @@ class ScalperBot:
         emoji = '✅' if trade['pnl'] > 0 else '❌'
         reason_emoji = "📊" if reason == "signal" else "🎯"
         reason_text = "сигнал EMA" if reason == "signal" else "трейлінг-стоп"
-    
-    # Визначаємо формат ціни
+        
+        # Визначаємо формат ціни
         if trade['entry'] < 1 or trade['exit'] < 1:
-            price_format = ".4f"  # 4 знаки для монет < 1$
+            price_format = ".4f"
         else:
-            price_format = ".2f"  # 2 знаки для інших
-    
-    # Форматуємо ціни
+            price_format = ".2f"
+        
+        # Форматуємо ціни
         entry_price = f"{trade['entry']:{price_format}}"
         exit_price = f"{trade['exit']:{price_format}}"
-    
+        
         max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.2f}%\n"
-    
+        
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
                f"Тип: {'🟢 LONG' if trade['side'] == 'LONG' else '🔴 SHORT'}\n"
@@ -299,7 +311,7 @@ class ScalperBot:
                f"📊 PnL: *{trade['pnl']:+.2f}%*\n"
                f"{max_profit_line}"
                f"{reason_emoji} Причина: {reason_text}\n"
-               f"⏱ Час утримання: {trade['hold_minutes']} хв\n"
+               f"⏱ Час утримання: {trade['hold_minutes']:.1f} хв\n"
                f"🕒 {trade['entry_time']} → {trade['exit_time']}")
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
@@ -307,20 +319,20 @@ class ScalperBot:
         try:
             if not hasattr(config, 'CHANNEL_ID') or not config.CHANNEL_ID:
                 return
-        
+            
             # Визначаємо формат ціни
             if trade_info['entry'] < 1 or trade_info['exit'] < 1:
                 price_format = ".4f"
             else:
                 price_format = ".2f"
-        
-        # Форматуємо ціни
+            
+            # Форматуємо ціни
             entry_price = f"{trade_info['entry']:{price_format}}"
             exit_price = f"{trade_info['exit']:{price_format}}"
-        
+            
             emoji = '✅' if trade_info['pnl'] > 0 else '❌'
             reason_emoji = "🎯" if trade_info.get('exit_reason') == 'trailing' else "📊"
-        
+            
             msg = (f"{emoji} *УГОДА*\n"
                    f"Монета: {trade_info['symbol']}\n"
                    f"Тип: {'🟢 LONG' if trade_info['side'] == 'LONG' else '🔴 SHORT'}\n"
@@ -328,9 +340,9 @@ class ScalperBot:
                    f"📊 PnL: *{trade_info['pnl']:+.2f}%*\n"
                    f"📈 Макс: {trade_info['max_pnl']:+.2f}%\n"
                    f"{reason_emoji} {trade_info.get('exit_reason', 'signal')}\n"
-                   f"⏱ {trade_info['hold_minutes']} хв\n"
+                   f"⏱ {trade_info['hold_minutes']:.1f} хв\n"
                    f"🕒 {trade_info['entry_time']} → {trade_info['exit_time']}")
-        
+            
             global bot
             bot.send_message(config.CHANNEL_ID, msg, parse_mode='Markdown')
         except Exception as e:
@@ -340,8 +352,22 @@ class ScalperBot:
         print("🤖 Моніторинг запущено. Чекаємо на перетин EMA 20/50 на 5хв...")
         print(f"📊 Трейлінг-стоп: ВИМКНЕНО (тільки сигнали EMA)")
         
+        last_candle_check = 0
+        
         while self.running:
             current_time = time.time()
+            
+            # 🟢 ПЕРЕВІРКА НОВОЇ СВІЧКИ (кожні 5 хвилин)
+            if current_time - last_candle_check > 300:  # 5 хвилин
+                print(f"🕐 Оновлюємо EMA дані...")
+                # Очищаємо стани щоб примусово перерахувати EMA
+                for symbol in config.SYMBOLS:
+                    if symbol in self.last_state:
+                        # Тимчасово видаляємо щоб отримати новий стан
+                        old_state = self.last_state[symbol]
+                        del self.last_state[symbol]
+                        print(f"🔄 {symbol}: перерахунок EMA")
+                last_candle_check = current_time
             
             # Перевіряємо сигнали EMA для нових угод
             for symbol in config.SYMBOLS:
@@ -352,7 +378,6 @@ class ScalperBot:
                         if symbol in self.positions:
                             current_pos = self.positions[symbol]
                             
-                            # Закриваємо ТІЛЬКИ якщо сигнал протилежний
                             if (current_pos.side == 'LONG' and signal == 'SHORT') or \
                                (current_pos.side == 'SHORT' and signal == 'LONG'):
                                 self.close_position(symbol, price, current_time, "signal")
@@ -404,13 +429,12 @@ def price_cmd(message):
             ticker = client.get_ticker(kucoin_symbol)
             price = float(ticker['price'])
             
-            # 🟢 ДИНАМІЧНЕ ФОРМАТУВАННЯ
             if price < 1:
-                price_str = f"{price:.4f}"  # 4 знаки для монет < 1$
+                price_str = f"{price:.4f}"
             elif price < 10:
-                price_str = f"{price:.3f}"  # 3 знаки для монет 1-10$
+                price_str = f"{price:.3f}"
             else:
-                price_str = f"{price:.2f}"  # 2 знаки для інших
+                price_str = f"{price:.2f}"
             
             msg += f"\n{symbol}: ${price_str}"
         bot.reply_to(message, msg, parse_mode='Markdown')
@@ -431,10 +455,18 @@ def status_cmd(message):
             
             hold_time = (time.time() - pos.entry_time) / 60
             
+            # Форматуємо ціну входу
+            if pos.entry_price < 1:
+                entry_str = f"{pos.entry_price:.4f}"
+            elif pos.entry_price < 10:
+                entry_str = f"{pos.entry_price:.3f}"
+            else:
+                entry_str = f"{pos.entry_price:.2f}"
+            
             msg += (f"\n{symbol}: {'🟢 LONG' if pos.side == 'LONG' else '🔴 SHORT'}\n"
-                    f"Вхід: ${round(pos.entry_price, 2)}\n"
+                    f"Вхід: ${entry_str}\n"
                     f"Поточна PnL: {pnl:+.2f}%\n"
-                    f"⏱ {round(hold_time, 1)} хв\n")
+                    f"⏱ {hold_time:.1f} хв\n")
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
         bot.reply_to(message, "Немає активних позицій")
@@ -447,8 +479,18 @@ def history_cmd(message):
         for _, trade in trades.iterrows():
             emoji = '✅' if trade['pnl_percent'] > 0 else '❌'
             reason_emoji = "🎯" if 'exit_reason' in trade and trade['exit_reason'] == 'trailing' else "📊"
+            
+            # Форматуємо ціни
+            if trade['entry_price'] < 1 or trade['exit_price'] < 1:
+                entry_str = f"{trade['entry_price']:.4f}"
+                exit_str = f"{trade['exit_price']:.4f}"
+            else:
+                entry_str = f"{trade['entry_price']:.2f}"
+                exit_str = f"{trade['exit_price']:.2f}"
+            
             msg += (f"{emoji} {trade['symbol']} {trade['side']}\n"
                    f"PnL: {trade['pnl_percent']:+.2f}% | {reason_emoji} {trade.get('exit_reason', 'signal')}\n"
+                   f"${entry_str} → ${exit_str}\n"
                    f"{trade['entry_time']} → {trade['exit_time']}\n\n")
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
@@ -475,7 +517,194 @@ def stats_cmd(message):
     
     bot.reply_to(message, msg, parse_mode='Markdown')
 
-# Інші команди (maxprofits, maxlosses, records, daily, hourly, weekly, monthly, analyze) залишаються без змін
+@bot.message_handler(commands=['maxprofits'])
+def maxprofits_cmd(message):
+    max_profits = db.get_max_profits(limit=10)
+    if len(max_profits) > 0:
+        msg = "🏆 *ТОП-10 НАЙБІЛЬШИХ ПРИБУТКІВ*\n\n"
+        for i, (_, trade) in enumerate(max_profits.iterrows(), 1):
+            emoji = '🥇' if i == 1 else '🥈' if i == 2 else '🥉' if i == 3 else '📈'
+            
+            # Форматуємо ціни
+            if trade['entry_price'] < 1 or trade['exit_price'] < 1:
+                entry_str = f"{trade['entry_price']:.4f}"
+                exit_str = f"{trade['exit_price']:.4f}"
+            else:
+                entry_str = f"{trade['entry_price']:.2f}"
+                exit_str = f"{trade['exit_price']:.2f}"
+            
+            msg += (f"{emoji} *{i}. {trade['symbol']} {trade['side']}*\n"
+                   f"   PnL: *{trade['pnl_percent']:+.2f}%*\n"
+                   f"   Вхід: ${entry_str} → Вихід: ${exit_str}\n"
+                   f"   Час: {trade['hold_minutes']} хв\n"
+                   f"   {trade['entry_time']} → {trade['exit_time']}\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних про прибутки")
+
+@bot.message_handler(commands=['maxlosses'])
+def maxlosses_cmd(message):
+    max_losses = db.get_max_losses(limit=10)
+    if len(max_losses) > 0:
+        msg = "💔 *ТОП-10 НАЙБІЛЬШИХ ЗБИТКІВ*\n\n"
+        for i, (_, trade) in enumerate(max_losses.iterrows(), 1):
+            emoji = '💀' if i == 1 else '😱' if i == 2 else '😭' if i == 3 else '📉'
+            
+            # Форматуємо ціни
+            if trade['entry_price'] < 1 or trade['exit_price'] < 1:
+                entry_str = f"{trade['entry_price']:.4f}"
+                exit_str = f"{trade['exit_price']:.4f}"
+            else:
+                entry_str = f"{trade['entry_price']:.2f}"
+                exit_str = f"{trade['exit_price']:.2f}"
+            
+            msg += (f"{emoji} *{i}. {trade['symbol']} {trade['side']}*\n"
+                   f"   PnL: *{trade['pnl_percent']:+.2f}%*\n"
+                   f"   Вхід: ${entry_str} → Вихід: ${exit_str}\n"
+                   f"   Час: {trade['hold_minutes']} хв\n"
+                   f"   {trade['entry_time']} → {trade['exit_time']}\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних про збитки")
+
+@bot.message_handler(commands=['records'])
+def records_cmd(message):
+    records = db.get_records()
+    if len(records) > 0:
+        msg = "🎯 *РЕКОРДИ*\n\n"
+        for _, record in records.iterrows():
+            if record['record_type'] == 'MAX_PROFIT':
+                # Форматуємо ціни
+                if record['entry_price'] < 1 or record['exit_price'] < 1:
+                    entry_str = f"{record['entry_price']:.4f}"
+                    exit_str = f"{record['exit_price']:.4f}"
+                else:
+                    entry_str = f"{record['entry_price']:.2f}"
+                    exit_str = f"{record['exit_price']:.2f}"
+                
+                msg += f"🏆 *Найбільший прибуток:*\n"
+                msg += f"   {record['symbol']} {record['side']}: +{record['value']:.2f}%\n"
+                msg += f"   Вхід: ${entry_str} → Вихід: ${exit_str}\n"
+                msg += f"   {record['entry_time']} → {record['exit_time']}\n\n"
+            elif record['record_type'] == 'MAX_LOSS':
+                # Форматуємо ціни
+                if record['entry_price'] < 1 or record['exit_price'] < 1:
+                    entry_str = f"{record['entry_price']:.4f}"
+                    exit_str = f"{record['exit_price']:.4f}"
+                else:
+                    entry_str = f"{record['entry_price']:.2f}"
+                    exit_str = f"{record['exit_price']:.2f}"
+                
+                msg += f"💔 *Найбільший збиток:*\n"
+                msg += f"   {record['symbol']} {record['side']}: {record['value']:.2f}%\n"
+                msg += f"   Вхід: ${entry_str} → Вихід: ${exit_str}\n"
+                msg += f"   {record['entry_time']} → {record['exit_time']}\n\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає рекордів")
+
+@bot.message_handler(commands=['daily'])
+def daily_cmd(message):
+    daily = db.get_daily_stats(days=7)
+    if len(daily) > 0:
+        msg = "📅 *ОСТАННІ 7 ДНІВ*\n\n"
+        for _, day in daily.iterrows():
+            winrate = (day['wins'] / day['total_trades'] * 100) if day['total_trades'] > 0 else 0
+            msg += (f"*{day['date']} - {day['symbol']}*\n"
+                   f"Угод: {day['total_trades']} | PnL: {day['total_pnl']:+.2f}%\n"
+                   f"✅ {day['wins']} | ❌ {day['losses']} | вінрейт: {winrate:.0f}%\n"
+                   f"📈 Max: {day['max_profit']:+.2f}% | Min: {day['max_loss']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за дні")
+
+@bot.message_handler(commands=['hourly'])
+def hourly_cmd(message):
+    hourly = db.get_hourly_stats()
+    if len(hourly) > 0:
+        msg = "🕐 *ГОДИННА СТАТИСТИКА*\n\n"
+        for _, hour in hourly.iterrows():
+            msg += (f"*{hour['hour']:02d}:00 - {hour['symbol']}*\n"
+                   f"Угод: {hour['total_trades']} | PnL: {hour['avg_pnl']:+.2f}%\n"
+                   f"Вінрейт: {hour['winrate']}% | Max: {hour['max_profit']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за години")
+
+@bot.message_handler(commands=['weekly'])
+def weekly_cmd(message):
+    weekly = db.get_weekly_stats(weeks=4)
+    if len(weekly) > 0:
+        msg = "📊 *ТИЖНЕВА СТАТИСТИКА*\n\n"
+        for _, week in weekly.iterrows():
+            winrate = (week['wins'] / week['total_trades'] * 100) if week['total_trades'] > 0 else 0
+            msg += (f"*Тиждень {week['week']}, {week['year']} - {week['symbol']}*\n"
+                   f"Угод: {week['total_trades']} | PnL: {week['total_pnl']:+.2f}%\n"
+                   f"✅ {week['wins']} | ❌ {week['losses']} | вінрейт: {winrate:.0f}%\n"
+                   f"📈 Max: {week['max_profit']:+.2f}% | Min: {week['max_loss']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за тижні")
+
+@bot.message_handler(commands=['monthly'])
+def monthly_cmd(message):
+    monthly = db.get_monthly_stats(months=6)
+    if len(monthly) > 0:
+        msg = "📊 *МІСЯЧНА СТАТИСТИКА*\n\n"
+        months = ['Січ', 'Лют', 'Бер', 'Кві', 'Тра', 'Чер', 'Лип', 'Сер', 'Вер', 'Жов', 'Лис', 'Гру']
+        for _, month in monthly.iterrows():
+            winrate = (month['wins'] / month['total_trades'] * 100) if month['total_trades'] > 0 else 0
+            msg += (f"*{months[month['month']-1]} {month['year']} - {month['symbol']}*\n"
+                   f"Угод: {month['total_trades']} | PnL: {month['total_pnl']:+.2f}%\n"
+                   f"✅ {month['wins']} | ❌ {month['losses']} | вінрейт: {winrate:.0f}%\n"
+                   f"📈 Max: {month['max_profit']:+.2f}% | Min: {month['max_loss']:+.2f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних за місяці")
+
+@bot.message_handler(commands=['analyze'])
+def analyze_cmd(message):
+    analysis = db.get_detailed_analysis()
+    if not analysis:
+        bot.reply_to(message, "Немає даних для аналізу")
+        return
+    
+    msg = "📊 *ДЕТАЛЬНИЙ АНАЛІЗ*\n\n"
+    
+    msg += f"*ЗАГАЛЬНЕ*\n"
+    msg += f"📈 Угод: {analysis['total_trades']}\n"
+    msg += f"💰 Заг. PnL: {analysis['total_pnl']:+.2f}%\n"
+    msg += f"🎯 Вінрейт: {analysis['winrate']:.1f}%\n"
+    msg += f"📊 Профіт фактор: {analysis['profit_factor']:.2f}\n\n"
+    
+    if analysis['records']:
+        msg += f"*РЕКОРДИ*\n"
+        for record in analysis['records']:
+            if record['record_type'] == 'MAX_PROFIT':
+                msg += f"🏆 Max прибуток: +{record['value']:.2f}% ({record['symbol']})\n"
+            else:
+                msg += f"💔 Max збиток: {record['value']:.2f}% ({record['symbol']})\n"
+        msg += "\n"
+    
+    msg += f"*АНАЛІЗ ПО ГОДИНАХ*\n"
+    for hour, stats in analysis['by_hour'].iterrows():
+        if stats[('pnl_percent', 'count')] >= 3:
+            msg += (f"{hour:02d}:00 - {hour+1:02d}:00 | "
+                   f"угод: {int(stats[('pnl_percent', 'count')])} | "
+                   f"сер: {stats[('pnl_percent', 'mean')]:+.2f}% | "
+                   f"max: {stats[('pnl_percent', 'max')]:+.2f}%\n")
+    msg += "\n"
+    
+    msg += f"*АНАЛІЗ ПО ДНЯХ ТИЖНЯ*\n"
+    days = ['Пон', 'Вів', 'Сер', 'Чет', 'Пят', 'Суб', 'Нед']
+    for day, stats in analysis['by_day'].iterrows():
+        if stats[('pnl_percent', 'count')] >= 3:
+            msg += (f"{days[day]} | "
+                   f"угод: {int(stats[('pnl_percent', 'count')])} | "
+                   f"сер: {stats[('pnl_percent', 'mean')]:+.2f}% | "
+                   f"max: {stats[('pnl_percent', 'max')]:+.2f}%\n")
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['cleardb'])
 def cleardb_cmd(message):

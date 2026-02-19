@@ -110,43 +110,37 @@ class ScalperBot:
         try:
             kucoin_symbol = self.convert_symbol(symbol)
         
-            # 🟢 РАХУЄМО ЧАС КОЖЕН РАЗ
+            # 🟢 БЕРЕМО ПОТОЧНИЙ ЧАС (НЕ ОКРУГЛЮЄМО!)
             now = int(time.time())
-            current_minute = datetime.now().minute
-            # Остання ЗАКРИТА 5хв свічка
-            last_5min_candle = now - (current_minute % 5 * 60) - (now % 60)
         
-            # Якщо минуло менше 5 хвилин від початку години, беремо попередню свічку
-            if current_minute % 5 == 0 and now % 60 < 60:
-                last_5min_candle = last_5min_candle - 300
-        
-            print(f"🕐 Час: {datetime.now().strftime('%H:%M:%S')}, остання 5хв свічка: {datetime.fromtimestamp(last_5min_candle).strftime('%H:%M')}")
-        
+            # Беремо 100 свічок включаючи поточну незакриту
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=last_5min_candle - 500*60,
-                end_at=last_5min_candle
+                start_at=now - 500*60,
+                end_at=now  # Беремо поточний час, включно з незакритою свічкою
             )
         
             if not klines or len(klines) < 60:
-                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines) if klines else 0}")
+                print(f"⚠️ Недостатньо даних для {symbol}")
                 return None, None, None
         
             # Беремо останні 60 свічок
             klines = klines[-60:]
             closes = [float(k[2]) for k in klines]
+        
+            # 🟢 ВАЖЛИВО! Додаємо поточну ціну з ticker для незакритої свічки
+            current_price = self.get_real_price(symbol)
+            if current_price:
+                # Замінюємо останню ціну на поточну
+                closes[-1] = current_price
+        
             df = pd.DataFrame(closes, columns=['close'])
         
             ema_fast = df['close'].ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
-            current_price = closes[-1]
         
-            # 🟢 ЛОГУЄМО ЧАС ОСТАННЬОЇ СВІЧКИ
-            last_candle_time = datetime.fromtimestamp(int(klines[-1][0])).strftime('%H:%M')
-            print(f"📊 {symbol}: свічка {last_candle_time}, EMA20={ema_fast:.2f}, EMA50={ema_slow:.2f}")
-        
-            return ema_fast, ema_slow, current_price
+            return ema_fast, ema_slow, current_price or closes[-1]
         except Exception as e:
             print(f"Помилка для {symbol}: {e}")
             return None, None, None

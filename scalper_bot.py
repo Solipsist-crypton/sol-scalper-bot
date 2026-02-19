@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import telebot
 from telebot import types
-from binance.client import Client
+from kucoin.client import Market  # 🔄 Зміна: KuCoin замість Binance
 import pandas as pd
 import time
 import threading
@@ -29,7 +29,12 @@ def check_single_instance():
                 old_pid = f.read().strip()
             print(f"⚠️ Бот вже запущений з PID {old_pid}")
             print("⏹️ Зупиняємо старі процеси...")
-            os.system("pkill -f 'python.*scalper_bot.py' || true")
+            # Для Railway використовуємо інший спосіб
+            if os.path.exists('/app'):
+                # Railway environment
+                pass
+            else:
+                os.system("pkill -f 'python.*scalper_bot.py' || true")
             time.sleep(3)
             os.remove(LOCK_FILE)
             os.remove(PID_FILE)
@@ -59,9 +64,12 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
-client = Client(
-    api_key=config.EXCHANGE_API_KEY,
-    api_secret=config.EXCHANGE_API_SECRET
+
+# 🟢 KuCoin клієнт з API ключами
+client = Market(
+    key=config.EXCHANGE_API_KEY,
+    secret=config.EXCHANGE_API_SECRET,
+    passphrase=config.EXCHANGE_API_PASSPHRASE
 )
 
 # Глобальний екземпляр бота
@@ -107,37 +115,54 @@ class ScalperBot:
         db.save_last_state(symbol, state)
     
     def convert_symbol(self, symbol):
-        return symbol  # Binance використовує SOLUSDT, не SOL-USDT
+        """🔄 KuCoin вимагає дефіс: SOLUSDT -> SOL-USDT"""
+        return symbol.replace('USDT', '-USDT')
     
     def get_emas(self, symbol):
         try:
-            # Отримуємо свічки з Binance
-            klines = client.get_klines(
-                symbol=symbol,
-                interval=Client.KLINE_INTERVAL_5MINUTE,
-                limit=500  # 500 свічок достатньо
+            kucoin_symbol = self.convert_symbol(symbol)
+            
+            # 🟢 KuCoin версія - беремо 300 свічок для стабільності
+            now = int(time.time())
+            # Остання повна 5хв свічка
+            current_minute = datetime.now().minute
+            last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
+            
+            klines = client.get_kline(
+                symbol=kucoin_symbol,
+                kline_type='5min',
+                start_at=last_full_candle - 1500*60,  # 1500 хвилин = 300 свічок
+                end_at=last_full_candle
             )
-        
-            if not klines or len(klines) < 100:
+            
+            if not klines or len(klines) < 200:
+                print(f"⚠️ Недостатньо даних для {symbol}")
                 return None, None, None
-        
-            closes = [float(k[4]) for k in klines]  # ціна закриття
+            
+            # Беремо останні 200 свічок
+            klines = klines[-200:]
+            closes = [float(k[2]) for k in klines]  # KuCoin: індекс 2 = close
             df = pd.DataFrame(closes, columns=['close'])
-        
-            ema_fast = df['close'].ewm(span=20).mean().iloc[-1]
-            ema_slow = df['close'].ewm(span=50).mean().iloc[-1]
-        
+            
+            ema_fast = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
+            ema_slow = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+            
             return ema_fast, ema_slow, closes[-1]
         except Exception as e:
             print(f"Помилка {symbol}: {e}")
             return None, None, None
     
     def get_real_price(self, symbol):
+        """Отримує реальну ціну в режимі реального часу"""
         try:
-            ticker = client.get_symbol_ticker(symbol=symbol)
+            kucoin_symbol = self.convert_symbol(symbol)
+            ticker = client.get_ticker(kucoin_symbol)
+            if not ticker or 'price' not in ticker:
+                print(f"⚠️ Немає ціни для {symbol}")
+                return None
             return float(ticker['price'])
         except Exception as e:
-            print(f"Помилка ціни {symbol}: {e}")
+            print(f"Помилка отримання ціни для {symbol}: {e}")
             return None
     
     def check_crossover(self, symbol):
@@ -153,12 +178,15 @@ class ScalperBot:
         
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         current_time = time.time()
+        
+        # Динамічне форматування для логів
         if ema_fast < 1 or ema_slow < 1:
             ema_format = ".4f"
         elif ema_fast < 10 or ema_slow < 10:
             ema_format = ".3f"
         else:
             ema_format = ".2f"
+        
         # Логуємо EMA для перевірки
         print(f"📊 {symbol}: EMA20={ema_fast:{ema_format}}, EMA50={ema_slow:{ema_format}}, diff={ema_fast-ema_slow:{ema_format}}, стан={current_state}")
         
@@ -200,36 +228,38 @@ class ScalperBot:
             pos = self.positions[symbol]
             pos.exit_price = exit_price
             pos.exit_time = exit_time
-        
+            
             if pos.side == 'LONG':
                 pos.pnl_percent = ((exit_price - pos.entry_price) / pos.entry_price) * 100
             else:
                 pos.pnl_percent = ((pos.entry_price - exit_price) / pos.entry_price) * 100
-        
+            
             # 🔥 Рахуємо максимальний профіт за угоду (для статистики)
             max_price = 0
             min_price = float('inf')
-        
-            try:
-                # 🟢 BINANCE ВЕРСІЯ - використовуємо get_klines
-                klines = client.get_klines(
-                    symbol=symbol,
-                    interval=Client.KLINE_INTERVAL_5MINUTE,
-                    limit=100  # Беремо 100 свічок для аналізу
-                )
             
+            try:
+                kucoin_symbol = self.convert_symbol(symbol)
+                # 🟢 KuCoin версія
+                klines = client.get_kline(
+                    symbol=kucoin_symbol,
+                    kline_type='5min',
+                    start_at=int(pos.entry_time) - 60,
+                    end_at=int(exit_time) + 60
+                )
+                
                 if klines:
                     for k in klines:
-                        # Binance формат свічки:
-                        # k[0] = timestamp відкриття
+                        # KuCoin формат свічки:
+                        # k[0] = time
                         # k[1] = open
-                        # k[2] = high  <-- ЦЕ НАМ ПОТРІБНО
-                        # k[3] = low   <-- ЦЕ НАМ ПОТРІБНО
-                        # k[4] = close
+                        # k[2] = close
+                        # k[3] = high
+                        # k[4] = low
                         # k[5] = volume
-                        high = float(k[2])  # максимальна ціна
-                        low = float(k[3])   # мінімальна ціна
-                    
+                        high = float(k[3])  # максимальна ціна
+                        low = float(k[4])   # мінімальна ціна
+                        
                         if high > max_price:
                             max_price = high
                         if low < min_price:
@@ -238,15 +268,15 @@ class ScalperBot:
                 print(f"❌ Помилка отримання свічок: {e}")
                 max_price = exit_price
                 min_price = exit_price
-        
+            
             # Рахуємо максимальний PnL в процентах
             if pos.side == 'LONG':
                 max_pnl = ((max_price - pos.entry_price) / pos.entry_price) * 100
             else:  # SHORT
                 max_pnl = ((pos.entry_price - min_price) / pos.entry_price) * 100
-        
+            
             hold_minutes = (exit_time - pos.entry_time) / 60
-        
+            
             trade_info = {
                 'symbol': symbol,
                 'side': pos.side,
@@ -259,16 +289,16 @@ class ScalperBot:
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S'),
                 'exit_reason': reason
             }
-        
+            
             # Зберігаємо в БД
             db.add_trade(trade_info)
-        
+            
             # 📤 Відправляємо в канал
             self.send_to_channel(trade_info)
-        
+            
             # Відправляємо результат
             self.send_trade_result(trade_info, reason)
-        
+            
             del self.positions[symbol]
             return trade_info
         return None
@@ -356,34 +386,41 @@ class ScalperBot:
     def monitor_loop(self):
         print("🤖 Моніторинг запущено. Чекаємо на перетин EMA 20/50 на 5хв...")
         print(f"📊 Трейлінг-стоп: ВИМКНЕНО (тільки сигнали EMA)")
-    
+        
+        last_candle_check = 0
+        
         while self.running:
             current_time = time.time()
-        
+            
+            # 🟢 ПЕРЕВІРКА НОВОЇ СВІЧКИ (кожні 5 хвилин)
+            if current_time - last_candle_check > 300:  # 5 хвилин
+                print(f"🕐 Оновлюємо EMA дані...")
+                last_candle_check = current_time
+            
             # Перевіряємо сигнали EMA для всіх монет
             for symbol in config.SYMBOLS:
                 try:
                     signal, state, price = self.check_crossover(symbol)
-                
+                    
                     if signal:
                         if symbol in self.positions:
                             current_pos = self.positions[symbol]
-                        
+                            
                             if (current_pos.side == 'LONG' and signal == 'SHORT') or \
-                                (current_pos.side == 'SHORT' and signal == 'LONG'):
+                               (current_pos.side == 'SHORT' and signal == 'LONG'):
                                 self.close_position(symbol, price, current_time, "signal")
                                 time.sleep(1)
                                 self.open_position(symbol, signal, price, current_time)
                             else:
                                 print(f"⚠️ {symbol}: ігноруємо {signal} - вже є {current_pos.side}")
-                    
+                        
                         else:
                             self.open_position(symbol, signal, price, current_time)
-                
+                    
                 except Exception as e:
                     print(f"Помилка для {symbol}: {e}")
-        
-        time.sleep(self.check_interval)
+            
+            time.sleep(self.check_interval)
 
 # ===== КОМАНДИ TELEGRAM =====
 @bot.message_handler(commands=['start'])
@@ -475,9 +512,12 @@ def status_cmd(message):
             else:
                 entry_str = f"{pos.entry_price:.2f}"
             
+            # Додаємо максимальний PnL
+            max_pnl_line = f"📈 Макс: {pos.max_pnl:+.2f}%"
+            
             msg += (f"\n{symbol}: {'🟢 LONG' if pos.side == 'LONG' else '🔴 SHORT'}\n"
                     f"Вхід: ${entry_str}\n"
-                    f"Поточна PnL: {pnl:+.2f}%\n"
+                    f"Поточна PnL: {pnl:+.2f}% | {max_pnl_line}\n"
                     f"⏱ {hold_time:.1f} хв\n")
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
@@ -528,6 +568,128 @@ def stats_cmd(message):
     msg += f"📊 Профіт фактор: {analysis['profit_factor']:.2f}"
     
     bot.reply_to(message, msg, parse_mode='Markdown')
+
+# Інші команди (maxprofits, maxlosses, records, daily, hourly, weekly, monthly, analyze, cleardb, crosshistory, emastatus, menu) залишаються без змін
+# Вони ідентичні твоєму коду, просто переконайся що в crosshistory_cmd використовується KuCoin API
+
+@bot.message_handler(commands=['crosshistory'])
+def crosshistory_cmd(message):
+    """Показує історію перетинів EMA 20/50 за останні 7 днів"""
+    try:
+        msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (7 днів)*\n\n"
+        
+        for symbol in config.SYMBOLS:
+            kucoin_symbol = symbol.replace('USDT', '-USDT')
+            
+            # Беремо 2000 свічок для історії
+            end_time = int(time.time())
+            start_time = end_time - 7*24*3600
+            
+            klines = client.get_kline(
+                symbol=kucoin_symbol,
+                kline_type='5min',
+                start_at=start_time,
+                end_at=end_time
+            )
+            
+            if not klines or len(klines) < 200:
+                msg += f"*{symbol}* – недостатньо даних\n\n"
+                continue
+            
+            closes = [float(k[2]) for k in klines]  # KuCoin: індекс 2 = close
+            df = pd.DataFrame(closes, columns=['close'])
+            df['ema20'] = df['close'].ewm(span=20).mean()
+            df['ema50'] = df['close'].ewm(span=50).mean()
+            
+            # Шукаємо перетини
+            crosses = []
+            for i in range(1, len(df)):
+                prev_state = df['ema20'].iloc[i-1] > df['ema50'].iloc[i-1]
+                curr_state = df['ema20'].iloc[i] > df['ema50'].iloc[i]
+                
+                if prev_state != curr_state:
+                    # Час закриття свічки
+                    close_time = int(klines[i][0]) + 300
+                    local_time = close_time + 7200  # +2 години для Києва
+                    time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
+                    
+                    signal = 'LONG' if curr_state else 'SHORT'
+                    price = df['close'].iloc[i]
+                    crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
+            
+            msg += f"*{symbol}*\n"
+            if crosses:
+                for cross in crosses[-10:]:
+                    msg += f"   {cross}\n"
+            else:
+                msg += "   За 7 днів перетинів не виявлено\n"
+            msg += "\n"
+        
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
+
+@bot.message_handler(commands=['emastatus'])
+def emastatus_cmd(message):
+    """Показує поточний стан EMA з історією"""
+    try:
+        msg = "📊 *СТАН EMA 20/50 (поточний)*\n\n"
+        
+        for symbol in config.SYMBOLS:
+            kucoin_symbol = symbol.replace('USDT', '-USDT')
+            
+            # Беремо 200 свічок
+            now = int(time.time())
+            current_minute = datetime.now().minute
+            last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
+            
+            klines = client.get_kline(
+                symbol=kucoin_symbol,
+                kline_type='5min',
+                start_at=last_full_candle - 1000*60,
+                end_at=last_full_candle
+            )
+            
+            if not klines or len(klines) < 60:
+                continue
+            
+            closes = [float(k[2]) for k in klines[-60:]]
+            df = pd.DataFrame(closes, columns=['close'])
+            df['ema20'] = df['close'].ewm(span=20).mean()
+            df['ema50'] = df['close'].ewm(span=50).mean()
+            
+            current_ema20 = df['ema20'].iloc[-1]
+            current_ema50 = df['ema50'].iloc[-1]
+            current_price = df['close'].iloc[-1]
+            
+            # Форматуємо числа
+            if current_price < 1:
+                price_fmt = ".4f"
+                ema_fmt = ".4f"
+            elif current_price < 10:
+                price_fmt = ".3f"
+                ema_fmt = ".3f"
+            else:
+                price_fmt = ".2f"
+                ema_fmt = ".2f"
+            
+            state = "🟢 LONG" if current_ema20 > current_ema50 else "🔴 SHORT"
+            diff = current_ema20 - current_ema50
+            
+            # Дивимось чи був перетин за останні 3 свічки
+            last_states = df['ema20'].iloc[-3:] > df['ema50'].iloc[-3:]
+            recent_cross = "⚠️ Щойно!" if last_states.iloc[-1] != last_states.iloc[-2] else ""
+            
+            msg += (f"*{symbol}*\n"
+                   f"   Стан: {state} {recent_cross}\n"
+                   f"   Ціна: ${current_price:{price_fmt}}\n"
+                   f"   EMA20: ${current_ema20:{ema_fmt}}\n"
+                   f"   EMA50: ${current_ema50:{ema_fmt}}\n"
+                   f"   Різниця: {diff:+.2f}\n\n")
+        
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Помилка: {e}")
 
 @bot.message_handler(commands=['maxprofits'])
 def maxprofits_cmd(message):
@@ -745,114 +907,6 @@ def callback_handler(call):
         bot.edit_message_text("❌ Скасовано", 
                             call.message.chat.id, 
                             call.message.message_id)
-@bot.message_handler(commands=['crosshistory'])
-def crosshistory_cmd(message):
-    """Показує історію перетинів EMA 20/50 за останні 7 днів"""
-    try:
-        msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (7 днів)*\n\n"
-        
-        for symbol in config.SYMBOLS:
-            # 🟢 Binance версія
-            klines = client.get_klines(
-                symbol=symbol,
-                interval=Client.KLINE_INTERVAL_5MINUTE,
-                limit=1000
-            )
-            
-            if not klines or len(klines) < 200:
-                msg += f"*{symbol}* – недостатньо даних\n\n"
-                continue
-            
-            closes = [float(k[4]) for k in klines]  # Binance: індекс 4 = close
-            df = pd.DataFrame(closes, columns=['close'])
-            df['ema20'] = df['close'].ewm(span=20).mean()
-            df['ema50'] = df['close'].ewm(span=50).mean()
-            
-            # Шукаємо перетини
-            crosses = []
-            for i in range(1, len(df)):
-                prev_state = df['ema20'].iloc[i-1] > df['ema50'].iloc[i-1]
-                curr_state = df['ema20'].iloc[i] > df['ema50'].iloc[i]
-                
-                if prev_state != curr_state:
-                    # Час закриття свічки (Binance дає timestamp в мілісекундах)
-                    close_time = klines[i][0] / 1000  # конвертуємо в секунди
-                    local_time = close_time + 7200  # +2 години для Києва
-                    time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
-                    
-                    signal = 'LONG' if curr_state else 'SHORT'
-                    price = df['close'].iloc[i]
-                    crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
-            
-            msg += f"*{symbol}*\n"
-            if crosses:
-                for cross in crosses[-10:]:
-                    msg += f"   {cross}\n"
-            else:
-                msg += "   За 7 днів перетинів не виявлено\n"
-            msg += "\n"
-        
-        bot.reply_to(message, msg, parse_mode='Markdown')
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
-        
-@bot.message_handler(commands=['emastatus'])
-def emastatus_cmd(message):
-    """Показує поточний стан EMA з історією"""
-    try:
-        msg = "📊 *СТАН EMA 20/50 (поточний)*\n\n"
-        
-        for symbol in config.SYMBOLS:
-            kucoin_symbol = symbol.replace('USDT', '-USDT')
-            
-            # Беремо 100 свічок
-            klines = client.get_kline(
-                symbol=kucoin_symbol,
-                kline_type='5min',
-                start_at=int(time.time()) - 500*60,
-                end_at=int(time.time())
-            )
-            
-            if not klines or len(klines) < 60:
-                continue
-            
-            closes = [float(k[2]) for k in klines[-60:]]
-            df = pd.DataFrame(closes, columns=['close'])
-            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-            
-            current_ema20 = df['ema20'].iloc[-1]
-            current_ema50 = df['ema50'].iloc[-1]
-            current_price = df['close'].iloc[-1]
-            
-            # Форматуємо числа
-            if current_price < 1:
-                price_fmt = ".4f"
-                ema_fmt = ".4f"
-            elif current_price < 10:
-                price_fmt = ".3f"
-                ema_fmt = ".3f"
-            else:
-                price_fmt = ".2f"
-                ema_fmt = ".2f"
-            
-            state = "🟢 LONG" if current_ema20 > current_ema50 else "🔴 SHORT"
-            diff = current_ema20 - current_ema50
-            
-            # Дивимось чи був перетин за останні 3 свічки
-            last_states = df['ema20'].iloc[-3:] > df['ema50'].iloc[-3:]
-            recent_cross = "⚠️ Щойно!" if last_states.iloc[-1] != last_states.iloc[-2] else ""
-            
-            msg += (f"*{symbol}*\n"
-                   f"   Стан: {state} {recent_cross}\n"
-                   f"   Ціна: ${current_price:{price_fmt}}\n"
-                   f"   EMA20: ${current_ema20:{ema_fmt}}\n"
-                   f"   EMA50: ${current_ema50:{ema_fmt}}\n"
-                   f"   Різниця: {diff:+.2f}\n\n")
-        
-        bot.reply_to(message, msg, parse_mode='Markdown')
-    except Exception as e:
-        bot.reply_to(message, f"Помилка: {e}")
 
 @bot.message_handler(commands=['menu'])
 def menu_cmd(message):

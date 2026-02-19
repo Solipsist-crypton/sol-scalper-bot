@@ -110,37 +110,37 @@ class ScalperBot:
         try:
             kucoin_symbol = self.convert_symbol(symbol)
         
-            # 🟢 БЕРЕМО ПОТОЧНИЙ ЧАС (НЕ ОКРУГЛЮЄМО!)
+            # 🟢 Беремо ТІЛЬКИ закриті свічки (до останньої повної 5хв свічки)
             now = int(time.time())
+            current_minute = datetime.now().minute
+            # Остання повна 5хв свічка
+            last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
         
-            # Беремо 100 свічок включаючи поточну незакриту
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=now - 500*60,
-                end_at=now  # Беремо поточний час, включно з незакритою свічкою
+                start_at=last_full_candle - 1000*60,  # 1000 хвилин = 200 свічок
+                end_at=last_full_candle
             )
         
-            if not klines or len(klines) < 60:
+            if not klines or len(klines) < 100:  # Потрібно більше даних для стабільних EMA
                 print(f"⚠️ Недостатньо даних для {symbol}")
                 return None, None, None
         
-            # Беремо останні 60 свічок
-            klines = klines[-60:]
+            # Беремо останні 100 свічок
+            klines = klines[-100:]
             closes = [float(k[2]) for k in klines]
         
-            # 🟢 ВАЖЛИВО! Додаємо поточну ціну з ticker для незакритої свічки
-            current_price = self.get_real_price(symbol)
-            if current_price:
-                # Замінюємо останню ціну на поточну
-                closes[-1] = current_price
-        
+            # 🟢 НЕ замінюємо останню ціну! Використовуємо тільки закриті свічки
             df = pd.DataFrame(closes, columns=['close'])
         
             ema_fast = df['close'].ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
         
-            return ema_fast, ema_slow, current_price or closes[-1]
+            # Окремо беремо реальну ціну для входу/виходу
+            real_price = self.get_real_price(symbol)
+        
+            return ema_fast, ema_slow, real_price or closes[-1]
         except Exception as e:
             print(f"Помилка для {symbol}: {e}")
             return None, None, None

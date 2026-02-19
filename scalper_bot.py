@@ -749,59 +749,65 @@ def callback_handler(call):
                             call.message.message_id)
 @bot.message_handler(commands=['crosshistory'])
 def crosshistory_cmd(message):
+    """Показує історію перетинів EMA 20/50 за останні 7 днів (або 48 годин)"""
     try:
-        msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (24 год)*\n\n"
+        msg = "📜 *ІСТОРІЯ ПЕРЕТИНІВ EMA 20/50 (7 днів)*\n\n"
         
         for symbol in config.SYMBOLS:
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             
-            # Беремо 500 свічок (близько 42 годин) для стабільних EMA
+            # Беремо 2000 свічок (≈7 днів) для достатньої історії
+            end_time = int(time.time())
+            start_time = end_time - 7*24*3600  # 7 днів тому
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=int(time.time()) - 48*3600,  # 48 годин
-                end_at=int(time.time())
+                start_at=start_time,
+                end_at=end_time
             )
             
-            if not klines or len(klines) < 200:
+            if not klines or len(klines) < 200:  # мінімум 200 свічок для стабільності
+                msg += f"*{symbol}* – недостатньо даних\n\n"
                 continue
             
-            # Формуємо DataFrame з цінами закриття
+            # Отримуємо ціни закриття
             closes = [float(k[2]) for k in klines]
-            df = pd.DataFrame(closes, columns=['close'])
             
-            # Розраховуємо EMA з min_periods
+            # Розраховуємо EMA з min_periods, щоб уникнути спотворень
+            df = pd.DataFrame(closes, columns=['close'])
             df['ema20'] = df['close'].ewm(span=20, adjust=False, min_periods=20).mean()
             df['ema50'] = df['close'].ewm(span=50, adjust=False, min_periods=50).mean()
             
-            # Визначаємо стан
-            df['state'] = df['ema20'] > df['ema50']
+            # Визначаємо стан тільки там, де обидва EMA не NaN
+            df['state'] = (df['ema20'] > df['ema50']) & df['ema20'].notna() & df['ema50'].notna()
             
             # Шукаємо перетини
             crosses = []
             for i in range(1, len(df)):
-                if df['state'].iloc[i] != df['state'].iloc[i-1]:
-                    # Час закриття свічки = час відкриття + 5 хв
-                    close_time = int(klines[i][0]) + 300
-                    # Конвертуємо в локальний час (Київ UTC+2)
-                    local_time = close_time + 7200
-                    time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
-                    
-                    signal = 'LONG' if df['state'].iloc[i] else 'SHORT'
-                    price = df['close'].iloc[i]
-                    crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
+                if pd.notna(df['ema20'].iloc[i]) and pd.notna(df['ema50'].iloc[i]) and \
+                   pd.notna(df['ema20'].iloc[i-1]) and pd.notna(df['ema50'].iloc[i-1]):
+                    if df['state'].iloc[i] != df['state'].iloc[i-1]:
+                        # Час закриття свічки
+                        close_time = int(klines[i][0]) + 300
+                        # Конвертуємо в локальний (Київ UTC+2)
+                        local_time = close_time + 7200
+                        time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
+                        signal = 'LONG' if df['state'].iloc[i] else 'SHORT'
+                        price = df['close'].iloc[i]
+                        crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
             
             msg += f"*{symbol}*\n"
             if crosses:
-                for cross in crosses[-5:]:  # останні 5 перетинів
+                # Показуємо останні 10 перетинів
+                for cross in crosses[-10:]:
                     msg += f"   {cross}\n"
             else:
-                msg += "   Немає перетинів за 48 год\n"
+                msg += "   За 7 днів перетинів не виявлено\n"
             msg += "\n"
         
         bot.reply_to(message, msg, parse_mode='Markdown')
     except Exception as e:
-        bot.reply_to(message, f"Помилка: {e}")
+        bot.reply_to(message, f"❌ Помилка: {e}")
         
 @bot.message_handler(commands=['emastatus'])
 def emastatus_cmd(message):

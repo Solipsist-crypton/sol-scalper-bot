@@ -279,16 +279,23 @@ class ScalperBot:
         emoji = '✅' if trade['pnl'] > 0 else '❌'
         reason_emoji = "📊" if reason == "signal" else "🎯"
         reason_text = "сигнал EMA" if reason == "signal" else "трейлінг-стоп"
+    
+    # Визначаємо формат ціни
         if trade['entry'] < 1 or trade['exit'] < 1:
             price_format = ".4f"  # 4 знаки для монет < 1$
         else:
             price_format = ".2f"  # 2 знаки для інших
-        max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.{price_format}}%\n"
-        
+    
+    # Форматуємо ціни
+        entry_price = f"{trade['entry']:{price_format}}"
+        exit_price = f"{trade['exit']:{price_format}}"
+    
+        max_profit_line = f"📈 Макс. профіт: {trade['max_pnl']:+.2f}%\n"
+    
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
                f"Тип: {'🟢 LONG' if trade['side'] == 'LONG' else '🔴 SHORT'}\n"
-               f"Вхід: ${trade['entry']} → Вихід: ${trade['exit']}\n"
+               f"Вхід: ${entry_price} → Вихід: ${exit_price}\n"
                f"📊 PnL: *{trade['pnl']:+.2f}%*\n"
                f"{max_profit_line}"
                f"{reason_emoji} Причина: {reason_text}\n"
@@ -297,28 +304,33 @@ class ScalperBot:
         bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
     
     def send_to_channel(self, trade_info):
-        """Відправляє угоду в Telegram канал"""
         try:
             if not hasattr(config, 'CHANNEL_ID') or not config.CHANNEL_ID:
                 return
+        
+            # Визначаємо формат ціни
             if trade_info['entry'] < 1 or trade_info['exit'] < 1:
                 price_format = ".4f"
             else:
                 price_format = ".2f"
-                
+        
+        # Форматуємо ціни
+            entry_price = f"{trade_info['entry']:{price_format}}"
+            exit_price = f"{trade_info['exit']:{price_format}}"
+        
             emoji = '✅' if trade_info['pnl'] > 0 else '❌'
             reason_emoji = "🎯" if trade_info.get('exit_reason') == 'trailing' else "📊"
-            
+        
             msg = (f"{emoji} *УГОДА*\n"
                    f"Монета: {trade_info['symbol']}\n"
                    f"Тип: {'🟢 LONG' if trade_info['side'] == 'LONG' else '🔴 SHORT'}\n"
-                   f"Вхід: ${trade_info['entry']} → Вихід: ${trade_info['exit']}\n"
+                   f"Вхід: ${entry_price} → Вихід: ${exit_price}\n"
                    f"📊 PnL: *{trade_info['pnl']:+.2f}%*\n"
                    f"📈 Макс: {trade_info['max_pnl']:+.2f}%\n"
                    f"{reason_emoji} {trade_info.get('exit_reason', 'signal')}\n"
                    f"⏱ {trade_info['hold_minutes']} хв\n"
                    f"🕒 {trade_info['entry_time']} → {trade_info['exit_time']}")
-            
+        
             global bot
             bot.send_message(config.CHANNEL_ID, msg, parse_mode='Markdown')
         except Exception as e:

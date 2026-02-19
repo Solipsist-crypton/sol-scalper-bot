@@ -9,7 +9,7 @@ CHANNEL_ID = -1003877678504  # Додайте цей рядок
 # Торгові налаштування
 SYMBOLS = ['SOLUSDT', 'BTCUSDT', 'ETHUSDT']
 INTERVAL = '5m'
-EMA_FAST = 12
-EMA_SLOW = 26
+EMA_FAST = 20
+EMA_SLOW = 50
 SEND_PHOTO = False
 # ========================

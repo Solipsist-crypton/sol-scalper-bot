@@ -121,35 +121,50 @@ class ScalperBot:
     def get_emas(self, symbol):
         try:
             kucoin_symbol = self.convert_symbol(symbol)
-            
+            print(f"🔍 Отримую дані для {kucoin_symbol}...")
+        
             # 🟢 KuCoin версія - беремо 300 свічок для стабільності
             now = int(time.time())
             # Остання повна 5хв свічка
             current_minute = datetime.now().minute
             last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
-            
+        
+            print(f"🕐 Час останньої свічки: {datetime.fromtimestamp(last_full_candle).strftime('%H:%M:%S')}")
+        
             klines = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
                 start_at=last_full_candle - 1500*60,  # 1500 хвилин = 300 свічок
                 end_at=last_full_candle
             )
-            
-            if not klines or len(klines) < 200:
-                print(f"⚠️ Недостатньо даних для {symbol}")
+        
+            print(f"📊 Отримано {len(klines) if klines else 0} свічок")
+        
+            if not klines:
+                print(f"⚠️ Немає даних для {symbol} (порожня відповідь)")
                 return None, None, None
-            
+        
+            if len(klines) < 200:
+                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок (потрібно 200+)")
+                return None, None, None
+        
             # Беремо останні 200 свічок
             klines = klines[-200:]
             closes = [float(k[2]) for k in klines]  # KuCoin: індекс 2 = close
+            print(f"📈 Перша ціна: {closes[0]}, остання ціна: {closes[-1]}")
+        
             df = pd.DataFrame(closes, columns=['close'])
-            
+        
             ema_fast = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-            
+        
+            print(f"✅ EMA20={ema_fast:.2f}, EMA50={ema_slow:.2f}")
+        
             return ema_fast, ema_slow, closes[-1]
         except Exception as e:
-            print(f"Помилка {symbol}: {e}")
+            print(f"❌ Помилка {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
             return None, None, None
     
     def get_real_price(self, symbol):

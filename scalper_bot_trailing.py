@@ -28,7 +28,7 @@ def check_single_instance():
             with open(PID_FILE, 'r') as f:
                 old_pid = f.read().strip()
             os.system(f"kill -9 {old_pid} || true")
-            time.sleep(2)
+            time.sleep(1)
         except: pass
     with open(LOCK_FILE, 'w') as f: f.write('locked')
     with open(PID_FILE, 'w') as f: f.write(str(os.getpid()))
@@ -71,14 +71,14 @@ class ScalperBot:
         self.running = True
         self.check_interval = 10
         
-        # Налаштування стратегії
+        # Стратегія
         self.rsi_period = 14
         self.rsi_oversold = 30
         self.rsi_overbought = 70
         self.hysteresis = 0.5
         self.rsi_extreme_exit = 83
         
-        # Ризик-менеджмент
+        # Ризики
         self.commission = 0.2
         self.be_trigger = 0.45
         self.trailing_activation = 0.7
@@ -87,17 +87,22 @@ class ScalperBot:
 
         self.load_states()
         self.set_bot_commands()
-        self.init_telegram_commands()
+        self.init_telegram_handlers()
+        
+        # Автозапуск моніторингу в окремому потоці
+        threading.Thread(target=self.run, daemon=True).start()
+        threading.Thread(target=self.daily_report_loop, daemon=True).start()
 
     def set_bot_commands(self):
-        """Створює кнопку 'Menu' в Telegram"""
-        commands = [
-            types.BotCommand("start", "Запустити бота та аналіз"),
-            types.BotCommand("status", "Активні позиції"),
-            types.BotCommand("stats", "Детальна статистика"),
-            types.BotCommand("report", "Отримати звіт за вчора")
-        ]
-        bot.set_my_commands(commands)
+        try:
+            commands = [
+                types.BotCommand("status", "🔍 Активні позиції"),
+                types.BotCommand("stats", "📊 Статистика закриттів"),
+                types.BotCommand("report", "📅 Звіт за вчора"),
+                types.BotCommand("start", "♻️ Перезапустити меню")
+            ]
+            bot.set_my_commands(commands)
+        except: pass
 
     def load_states(self):
         for symbol in config.SYMBOLS:
@@ -125,14 +130,11 @@ class ScalperBot:
             kucoin_symbol = self.convert_symbol(symbol)
             klines = client.get_kline(symbol=kucoin_symbol, kline_type='5min', limit=100)
             if not klines: return None
-            
             df = pd.DataFrame(klines, columns=['time', 'open', 'close', 'high', 'low', 'vol', 'amount'])
             df = df.astype(float).sort_values('time')
             df = self.calculate_indicators(df)
-            
             last = df.iloc[-1]
             avg_vol = df['vol'].tail(20).mean()
-            
             return {
                 'rsi': last['rsi'], 'price': last['close'], 'ema200': last['ema200'],
                 'vol_ok': last['vol'] > (avg_vol * 1.15),
@@ -142,30 +144,24 @@ class ScalperBot:
                 'low_shadow': df['low'].tail(5).min(), 'high_shadow': df['high'].tail(5).max(),
                 'df': df
             }
-        except Exception: return None
+        except: return None
 
     def check_signals(self):
         for symbol in config.SYMBOLS:
             if symbol in self.positions: continue
             data = self.get_market_data(symbol)
             if not data: continue
-
             rsi = data['rsi']
             last_zone = self.last_rsi_state.get(symbol, 'NORMAL')
-            
-            if rsi <= self.rsi_oversold: current_zone = 'OVERSOLD'
-            elif rsi >= self.rsi_overbought: current_zone = 'OVERBOUGHT'
-            else: current_zone = 'NORMAL'
+            current_zone = 'OVERSOLD' if rsi <= self.rsi_oversold else ('OVERBOUGHT' if rsi >= self.rsi_overbought else 'NORMAL')
 
-            signal = None
-            sl_price = 0
-            
+            signal, sl_price = None, 0
             if last_zone == 'OVERSOLD' and rsi > (self.rsi_oversold + self.hysteresis):
                 if data['price'] > data['ema200'] and data['candle_bullish'] and data['vol_ok']:
-                    signal = 'LONG'; sl_price = data['low_shadow']
+                    signal, sl_price = 'LONG', data['low_shadow']
             elif last_zone == 'OVERBOUGHT' and rsi < (self.rsi_overbought - self.hysteresis):
                 if data['price'] < data['ema200'] and data['candle_bearish'] and data['vol_ok']:
-                    signal = 'SHORT'; sl_price = data['high_shadow']
+                    signal, sl_price = 'SHORT', data['high_shadow']
 
             if current_zone != last_zone:
                 self.last_rsi_state[symbol] = current_zone
@@ -177,7 +173,6 @@ class ScalperBot:
         sl_p = abs(price - sl) / price * 100
         if sl_p > self.max_sl_percent or sl == 0:
             sl = price * (0.988 if side == 'LONG' else 1.012)
-            
         self.positions[symbol] = Position(symbol, side, price, sl, time.time())
         threading.Thread(target=self.send_chart, args=(symbol, side, price, sl), daemon=True).start()
 
@@ -197,37 +192,28 @@ class ScalperBot:
             pos = self.positions[symbol]
             data = self.get_market_data(symbol)
             if not data: continue
-            
             curr_p, rsi = data['price'], data['rsi']
-            pnl = ((curr_p - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else \
-                  ((pos.entry_price - curr_p) / pos.entry_price * 100)
-
-            if (pos.side == 'LONG' and rsi >= self.rsi_extreme_exit) or \
-               (pos.side == 'SHORT' and rsi <= (100 - self.rsi_extreme_exit)):
+            pnl = ((curr_p - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else ((pos.entry_price - curr_p) / pos.entry_price * 100)
+            
+            if (pos.side == 'LONG' and rsi >= self.rsi_extreme_exit) or (pos.side == 'SHORT' and rsi <= (100 - self.rsi_extreme_exit)):
                 self.close_position(symbol, curr_p, "RSI_EXTREME"); continue
-
-            if (pos.side == 'LONG' and curr_p <= pos.stop_loss) or \
-               (pos.side == 'SHORT' and curr_p >= pos.stop_loss):
+            if (pos.side == 'LONG' and curr_p <= pos.stop_loss) or (pos.side == 'SHORT' and curr_p >= pos.stop_loss):
                 self.close_position(symbol, curr_p, "STOP_LOSS"); continue
-
             if pnl >= self.be_trigger and not pos.be_activated:
                 pos.be_activated = True
                 pos.stop_loss = pos.entry_price + (curr_p * 0.0005 if pos.side == 'LONG' else -curr_p * 0.0005)
-
             if pnl > pos.max_pnl:
                 pos.max_pnl = pnl
                 if pnl >= self.trailing_activation:
                     pos.trailing_activated = True
                     pos.trailing_stop_level = pnl * self.trailing_callback
-            
             if pos.trailing_activated and pnl <= pos.trailing_stop_level:
                 self.close_position(symbol, curr_p, "TRAILING")
 
     def close_position(self, symbol, price, reason):
         pos = self.positions.pop(symbol, None)
         if not pos: return
-        raw_pnl = ((price - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else \
-                  ((pos.entry_price - price) / pos.entry_price * 100)
+        raw_pnl = ((price - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else ((pos.entry_price - price) / pos.entry_price * 100)
         net_pnl = raw_pnl - self.commission
         db.add_trade({
             'symbol': symbol, 'side': pos.side, 'entry': pos.entry_price, 'exit': price,
@@ -252,65 +238,37 @@ class ScalperBot:
         if trades.empty: return
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
         today_trades = trades[trades['exit_time'].str.contains(yesterday)]
-        
         if today_trades.empty:
             bot.send_message(config.CHAT_ID, f"🌙 *Звіт за {yesterday}:* Угод не було.")
             return
-
         total_net = today_trades['real_pnl'].sum()
         wins = len(today_trades[today_trades['real_pnl'] > 0])
-        
-        report = (
-            f"📅 *ПІДСУМКИ ЗА {yesterday}*\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"💰 Чистий PnL: *{total_net:+.2f}%*\n"
-            f"📊 Угод: *{len(today_trades)}* | Winrate: *{(wins/len(today_trades)*100):.1f}%*\n"
-            f"🚀 Топ угода: *{today_trades['real_pnl'].max():+.2f}%*"
-        )
+        report = (f"📅 *ПІДСУМКИ ЗА {yesterday}*\n━━━━━━━━━━━━━━━\n💰 Чистий PnL: *{total_net:+.2f}%*\n📊 Угод: *{len(today_trades)}* | WR: *{(wins/len(today_trades)*100):.1f}%*\n🚀 Топ: *{today_trades['real_pnl'].max():+.2f}%*")
         bot.send_message(config.CHAT_ID, report, parse_mode='Markdown')
 
-    def init_telegram_commands(self):
+    def init_telegram_handlers(self):
         @bot.message_handler(commands=['start'])
-        def start(m):
-            global scalper_instance
-            if scalper_instance is None:
-                scalper_instance = self
-                threading.Thread(target=self.run, daemon=True).start()
-                threading.Thread(target=self.daily_report_loop, daemon=True).start()
-                bot.reply_to(m, "🚀 Бот активований. Команди доступні через Menu.")
+        def welcome(m):
+            self.set_bot_commands()
+            bot.reply_to(m, "🤖 Бот RSI Pro у роботі! Керуйте через Menu.")
 
         @bot.message_handler(commands=['status'])
-        def status(m):
+        def status_cmd(m):
             if not self.positions: return bot.reply_to(m, "Активних позицій немає.")
             res = "📊 *ПОТОЧНІ ПОЗИЦІЇ:*"
             for s, p in self.positions.items():
-                res += f"\n`{s}` | Side: {p.side} | Max PnL: {p.max_pnl:.2f}%"
-            bot.send_message(m.chat.id, res, parse_mode='Markdown')
+                res += f"\n`{s}` | {p.side} | Max: {p.max_pnl:.2f}%"
+            bot.reply_to(m, res, parse_mode='Markdown')
 
         @bot.message_handler(commands=['stats'])
-        def stats(m):
+        def stats_cmd(m):
             df = db.get_trades(limit=200)
-            if df.empty: return bot.reply_to(m, "Історія угод порожня.")
-            
-            # Статистика по причинах
+            if df.empty: return bot.reply_to(m, "Історія порожня.")
             reasons = df['exit_reason'].value_counts().to_dict()
-            total_net = df['real_pnl'].sum()
-            
-            stat_msg = (
-                f"📈 *ЗАГАЛЬНА СТАТИСТИКА*\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"💰 Сумарний PnL: *{total_net:+.2f}%*\n"
-                f"📊 Всього угод: *{len(df)}*\n\n"
-                f"🔍 *Причини закриття:*\n"
-                f"🔹 Trailing Stop: `{reasons.get('TRAILING', 0)}` (успіх)\n"
-                f"🔹 RSI Extreme: `{reasons.get('RSI_EXTREME', 0)}` (фіксація)\n"
-                f"🔹 Break-Even: `{reasons.get('BE_EXIT', 0)}` (безубиток)\n"
-                f"🔸 Stop Loss: `{reasons.get('STOP_LOSS', 0)}` (збиток)"
-            )
-            bot.send_message(m.chat.id, stat_msg, parse_mode='Markdown')
+            bot.reply_to(m, f"📈 *СТАТИСТИКА:*\nTrailing: `{reasons.get('TRAILING',0)}`\nExtreme: `{reasons.get('RSI_EXTREME',0)}`\nStopLoss: `{reasons.get('STOP_LOSS',0)}`", parse_mode='Markdown')
 
         @bot.message_handler(commands=['report'])
-        def manual_report(m):
+        def report_manual(m):
             self.send_daily_stats()
 
     def run(self):
@@ -319,9 +277,10 @@ class ScalperBot:
                 self.monitor_positions()
                 self.check_signals()
                 time.sleep(self.check_interval)
-            except Exception as e:
-                print(f"Error: {e}"); time.sleep(10)
+            except: time.sleep(10)
 
-scalper_instance = None
+# ===== ЗАПУСК =====
 if __name__ == '__main__':
-    bot.infinity_polling()
+    print("🚀 Запуск Scalper Bot...")
+    bot_instance = ScalperBot() # Створюємо екземпляр класу
+    bot.infinity_polling()      # Запускаємо слухача повідомлень

@@ -123,35 +123,57 @@ class ScalperBot:
             kucoin_symbol = self.convert_symbol(symbol)
             print(f"🔍 Отримую дані для {kucoin_symbol}...")
         
-            # 🟢 KuCoin версія - беремо 300 свічок для стабільності
             now = int(time.time())
-            # Остання повна 5хв свічка
             current_minute = datetime.now().minute
             last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
         
             print(f"🕐 Час останньої свічки: {datetime.fromtimestamp(last_full_candle).strftime('%H:%M:%S')}")
         
-            klines = client.get_kline(
+            # 🟢 Робимо ДВА запити по 100 свічок
+            all_klines = []
+        
+            # Перший запит - останні 100 свічок
+            klines1 = client.get_kline(
                 symbol=kucoin_symbol,
                 kline_type='5min',
-                start_at=last_full_candle - 1500*60,  # 1500 хвилин = 300 свічок
+                start_at=last_full_candle - 100*300,  # 100 свічок * 5 хв = 500 хвилин
                 end_at=last_full_candle
             )
         
-            print(f"📊 Отримано {len(klines) if klines else 0} свічок")
+            if klines1:
+                all_klines.extend(klines1)
+            print(f"📊 Перший запит: {len(klines1)} свічок")
         
-            if not klines:
-                print(f"⚠️ Немає даних для {symbol} (порожня відповідь)")
+            # Другий запит - попередні 100 свічок
+            if len(all_klines) < 200:
+                klines2 = client.get_kline(
+                    symbol=kucoin_symbol,
+                    kline_type='5min',
+                    start_at=last_full_candle - 200*300,  # 200 свічок * 5 хв = 1000 хвилин
+                    end_at=last_full_candle - 100*300 - 1
+                )
+            
+                if klines2:
+                    all_klines.extend(klines2)
+                    print(f"📊 Другий запит: {len(klines2)} свічок")
+        
+            if not all_klines:
+                print(f"⚠️ Немає даних для {symbol}")
                 return None, None, None
         
-            if len(klines) < 200:
-                print(f"⚠️ Недостатньо даних для {symbol}: {len(klines)} свічок (потрібно 200+)")
+            # Сортуємо за часом (від старих до нових)
+            all_klines.sort(key=lambda x: x[0])
+        
+            print(f"📊 Всього отримано: {len(all_klines)} свічок")
+        
+            if len(all_klines) < 150:  # Зменшуємо вимогу до 150 свічок
+                print(f"⚠️ Недостатньо даних для {symbol}: {len(all_klines)} свічок (потрібно 150+)")
                 return None, None, None
         
-            # Беремо останні 200 свічок
-            klines = klines[-200:]
-            closes = [float(k[2]) for k in klines]  # KuCoin: індекс 2 = close
-            print(f"📈 Перша ціна: {closes[0]}, остання ціна: {closes[-1]}")
+            # Беремо останні 150 свічок
+            all_klines = all_klines[-150:]
+            closes = [float(k[2]) for k in all_klines]
+            print(f"📈 Перша ціна: {closes[0]:.2f}, остання ціна: {closes[-1]:.2f}")
         
             df = pd.DataFrame(closes, columns=['close'])
         
@@ -597,22 +619,34 @@ def crosshistory_cmd(message):
         for symbol in config.SYMBOLS:
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             
-            # Беремо 1000 свічок для історії
+            # Беремо дані частинами (по 100 свічок)
+            all_klines = []
             end_time = int(time.time())
-            start_time = end_time - 7*24*3600
             
-            klines = client.get_kline(
-                symbol=kucoin_symbol,
-                kline_type='5min',
-                start_at=start_time,
-                end_at=end_time
-            )
+            for i in range(7):  # 7 запитів по 100 свічок = 700 свічок (близько 2.5 днів)
+                start_time = end_time - 100*300  # 100 свічок * 5 хв
+                
+                klines = client.get_kline(
+                    symbol=kucoin_symbol,
+                    kline_type='5min',
+                    start_at=start_time,
+                    end_at=end_time
+                )
+                
+                if klines:
+                    all_klines.extend(klines)
+                
+                end_time = start_time - 1
+                time.sleep(0.5)  # Невелика пауза між запитами
             
-            if not klines or len(klines) < 200:
-                msg += f"*{symbol}* – недостатньо даних ({len(klines) if klines else 0} свічок)\n\n"
+            if not all_klines or len(all_klines) < 150:
+                msg += f"*{symbol}* – недостатньо даних ({len(all_klines) if all_klines else 0} свічок)\n\n"
                 continue
             
-            closes = [float(k[2]) for k in klines]
+            # Сортуємо за часом
+            all_klines.sort(key=lambda x: x[0])
+            
+            closes = [float(k[2]) for k in all_klines]
             df = pd.DataFrame(closes, columns=['close'])
             df['ema20'] = df['close'].ewm(span=20).mean()
             df['ema50'] = df['close'].ewm(span=50).mean()
@@ -624,7 +658,7 @@ def crosshistory_cmd(message):
                 curr_state = df['ema20'].iloc[i] > df['ema50'].iloc[i]
                 
                 if prev_state != curr_state:
-                    close_time = int(klines[i][0]) + 300
+                    close_time = int(all_klines[i][0]) + 300
                     local_time = close_time + 7200
                     time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
                     signal = 'LONG' if curr_state else 'SHORT'
@@ -636,7 +670,7 @@ def crosshistory_cmd(message):
                 for cross in crosses[-10:]:
                     msg += f"   {cross}\n"
             else:
-                msg += f"   За 7 днів перетинів не виявлено (проаналізовано {len(klines)} свічок)\n"
+                msg += f"   За 7 днів перетинів не виявлено (проаналізовано {len(all_klines)} свічок)\n"
             msg += "\n"
         
         bot.reply_to(message, msg, parse_mode='Markdown')

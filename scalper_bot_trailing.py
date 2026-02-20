@@ -27,7 +27,7 @@ def check_single_instance():
         try:
             with open(PID_FILE, 'r') as f:
                 old_pid = f.read().strip()
-            os.system(f"kill -9 {old_pid} || try")
+            os.system(f"kill -9 {old_pid} || true")
             time.sleep(2)
         except: pass
     with open(LOCK_FILE, 'w') as f: f.write('locked')
@@ -86,7 +86,18 @@ class ScalperBot:
         self.max_sl_percent = 1.5
 
         self.load_states()
+        self.set_bot_commands()
         self.init_telegram_commands()
+
+    def set_bot_commands(self):
+        """Створює кнопку 'Menu' в Telegram"""
+        commands = [
+            types.BotCommand("start", "Запустити бота та аналіз"),
+            types.BotCommand("status", "Активні позиції"),
+            types.BotCommand("stats", "Детальна статистика"),
+            types.BotCommand("report", "Отримати звіт за вчора")
+        ]
+        bot.set_my_commands(commands)
 
     def load_states(self):
         for symbol in config.SYMBOLS:
@@ -228,9 +239,7 @@ class ScalperBot:
         emoji = '✅' if net_pnl > 0 else '❌'
         bot.send_message(config.CHAT_ID, f"{emoji} *ЗАКРИТО: {reason}*\nМонета: `{symbol}`\nPnL: *{net_pnl:+.2f}%*", parse_mode='Markdown')
 
-    # ===== СЕКЦІЯ ЗВІТНОСТІ =====
     def daily_report_loop(self):
-        print("📊 Цикл щоденних звітів запущено.")
         while self.running:
             now = datetime.now()
             if now.hour == 0 and now.minute == 0:
@@ -241,7 +250,6 @@ class ScalperBot:
     def send_daily_stats(self):
         trades = db.get_trades(limit=100)
         if trades.empty: return
-        
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
         today_trades = trades[trades['exit_time'].str.contains(yesterday)]
         
@@ -251,14 +259,12 @@ class ScalperBot:
 
         total_net = today_trades['real_pnl'].sum()
         wins = len(today_trades[today_trades['real_pnl'] > 0])
-        winrate = (wins / len(today_trades)) * 100
         
         report = (
             f"📅 *ПІДСУМКИ ЗА {yesterday}*\n"
             f"━━━━━━━━━━━━━━━\n"
             f"💰 Чистий PnL: *{total_net:+.2f}%*\n"
-            f"📊 Угод: *{len(today_trades)}* (Winrate: {winrate:.1f}%)\n"
-            f"✅ Плюс: {wins} | ❌ Мінус: {len(today_trades)-wins}\n"
+            f"📊 Угод: *{len(today_trades)}* | Winrate: *{(wins/len(today_trades)*100):.1f}%*\n"
             f"🚀 Топ угода: *{today_trades['real_pnl'].max():+.2f}%*"
         )
         bot.send_message(config.CHAT_ID, report, parse_mode='Markdown')
@@ -271,13 +277,41 @@ class ScalperBot:
                 scalper_instance = self
                 threading.Thread(target=self.run, daemon=True).start()
                 threading.Thread(target=self.daily_report_loop, daemon=True).start()
-                bot.reply_to(m, "🚀 Бот активований. Щоденний звіт о 00:00.")
+                bot.reply_to(m, "🚀 Бот активований. Команди доступні через Menu.")
 
         @bot.message_handler(commands=['status'])
         def status(m):
-            if not self.positions: return bot.reply_to(m, "Позицій немає")
-            res = "📊 *Активні:* " + ", ".join([f"{s} ({p.max_pnl:.1f}%)" for s, p in self.positions.items()])
+            if not self.positions: return bot.reply_to(m, "Активних позицій немає.")
+            res = "📊 *ПОТОЧНІ ПОЗИЦІЇ:*"
+            for s, p in self.positions.items():
+                res += f"\n`{s}` | Side: {p.side} | Max PnL: {p.max_pnl:.2f}%"
             bot.send_message(m.chat.id, res, parse_mode='Markdown')
+
+        @bot.message_handler(commands=['stats'])
+        def stats(m):
+            df = db.get_trades(limit=200)
+            if df.empty: return bot.reply_to(m, "Історія угод порожня.")
+            
+            # Статистика по причинах
+            reasons = df['exit_reason'].value_counts().to_dict()
+            total_net = df['real_pnl'].sum()
+            
+            stat_msg = (
+                f"📈 *ЗАГАЛЬНА СТАТИСТИКА*\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💰 Сумарний PnL: *{total_net:+.2f}%*\n"
+                f"📊 Всього угод: *{len(df)}*\n\n"
+                f"🔍 *Причини закриття:*\n"
+                f"🔹 Trailing Stop: `{reasons.get('TRAILING', 0)}` (успіх)\n"
+                f"🔹 RSI Extreme: `{reasons.get('RSI_EXTREME', 0)}` (фіксація)\n"
+                f"🔹 Break-Even: `{reasons.get('BE_EXIT', 0)}` (безубиток)\n"
+                f"🔸 Stop Loss: `{reasons.get('STOP_LOSS', 0)}` (збиток)"
+            )
+            bot.send_message(m.chat.id, stat_msg, parse_mode='Markdown')
+
+        @bot.message_handler(commands=['report'])
+        def manual_report(m):
+            self.send_daily_stats()
 
     def run(self):
         while self.running:

@@ -203,57 +203,53 @@ class ScalperBot:
             return None
     
     def check_crossover(self, symbol):
-        """Перевіряє перетин EMA 20/50 на 5хв свічках"""
         ema_fast, ema_slow, price = self.get_emas(symbol)
         if not ema_fast:
             return None, None, None
-        
+    
         # Беремо РЕАЛЬНУ ціну для входу
         real_price = self.get_real_price(symbol)
         if not real_price:
             return None, None, None
-        
+    
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         current_time = time.time()
-        
-        # Динамічне форматування для логів
+    
+        # 🟢 Логуємо EMA
         if ema_fast < 1 or ema_slow < 1:
             ema_format = ".4f"
         elif ema_fast < 10 or ema_slow < 10:
             ema_format = ".3f"
         else:
             ema_format = ".2f"
-        
-        # Логуємо EMA для перевірки
+    
         print(f"📊 {symbol}: EMA20={ema_fast:{ema_format}}, EMA50={ema_slow:{ema_format}}, diff={ema_fast-ema_slow:{ema_format}}, стан={current_state}")
-        
-        # Якщо стан не завантажився з БД - зберігаємо
+    
+        # 🟢 ЯКЩО СТАНУ НЕМАЄ - ЗБЕРІГАЄМО І ЧЕКАЄМО
         if symbol not in self.last_state:
             self.last_state[symbol] = current_state
             self.save_state(symbol, current_state)
-            print(f"📊 {symbol}: початковий стан {current_state} (збережено в БД)")
+            print(f"📊 {symbol}: збережено початковий стан {current_state}")
             return None, None, real_price
-        
-        # ПЕРЕТИН! Стан змінився
+    
+        # 🟢 ПЕРЕТИН ТІЛЬКИ ЯКЩО СТАН ДІЙСНО ЗМІНИВСЯ
         if current_state != self.last_state[symbol]:
-            signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
-            
-            # Захист від дублікатів (30 секунд)
+            # Перевіряємо чи це не через перезапуск
             if symbol in self.last_signal:
-                last_signal_type = self.last_signal[symbol]['type']
-                last_signal_time = self.last_signal[symbol]['time']
-                if signal == last_signal_type and (current_time - last_signal_time) < 30:
-                    print(f"⏱️ {symbol}: ігноруємо дублікат {signal}")
+                time_since_last = current_time - self.last_signal[symbol]['time']
+                if time_since_last < 60:  # Якщо минуло менше хвилини
+                    print(f"⏱️ {symbol}: ігноруємо швидкий перетин")
                     return None, None, real_price
-            
-            # Зберігаємо новий стан
+        
+            signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
+        
             self.last_signal[symbol] = {'type': signal, 'time': current_time}
             self.last_state[symbol] = current_state
             self.save_state(symbol, current_state)
-            
+        
             print(f"🔥 {symbol}: ПЕРЕТИН EMA! {signal} (ціна: {real_price})")
             return signal, current_state, real_price
-        
+    
         return None, None, real_price
     
     def check_trailing_stop(self, symbol, current_price):
@@ -429,10 +425,6 @@ class ScalperBot:
         while self.running:
             current_time = time.time()
             
-            # 🟢 ПЕРЕВІРКА НОВОЇ СВІЧКИ (кожні 5 хвилин)
-            if current_time - last_candle_check > 300:  # 5 хвилин
-                print(f"🕐 Оновлюємо EMA дані...")
-                last_candle_check = current_time
             
             # Перевіряємо сигнали EMA для всіх монет
             for symbol in config.SYMBOLS:

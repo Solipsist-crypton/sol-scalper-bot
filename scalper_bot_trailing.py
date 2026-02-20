@@ -497,6 +497,56 @@ def hourly_cmd(message):
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
         bot.reply_to(message, "Немає даних")
+
+@bot.message_handler(commands=['analyze'])
+def analyze_cmd(message):
+    """Детальний аналіз стратегії"""
+    analysis = db.get_detailed_analysis()
+    if not analysis:
+        bot.reply_to(message, "Немає даних для аналізу")
+        return
+    
+    msg = "📊 *ДЕТАЛЬНИЙ АНАЛІЗ СТРАТЕГІЇ*\n\n"
+    
+    # Загальна статистика
+    msg += f"*ЗАГАЛЬНЕ*\n"
+    msg += f"📈 Угод: {analysis['total_trades']}\n"
+    msg += f"💰 Заг. PnL: {analysis['total_pnl']:+.2f}%\n"
+    msg += f"🎯 Вінрейт: {analysis['winrate']:.1f}%\n"
+    msg += f"📊 Профіт фактор: {analysis['profit_factor']:.2f}\n\n"
+    
+    # Рекорди
+    if analysis['records']:
+        msg += f"*РЕКОРДИ*\n"
+        for record in analysis['records']:
+            if record['record_type'] == 'MAX_PROFIT':
+                msg += f"🏆 Max прибуток: +{record['value']:.2f}%\n"
+            else:
+                msg += f"💔 Max збиток: {record['value']:.2f}%\n"
+        msg += "\n"
+    
+    # Аналіз по годинах
+    msg += f"*НАЙКРАЩІ ГОДИНИ*\n"
+    for hour, stats in analysis['by_hour'].iterrows():
+        if stats[('pnl_percent', 'count')] >= 3:
+            if stats[('pnl_percent', 'mean')] > 0:
+                msg += (f"🕐 {hour:02d}:00 | "
+                       f"PnL: {stats[('pnl_percent', 'mean')]:+.2f}% | "
+                       f"угод: {int(stats[('pnl_percent', 'count')])}\n")
+    msg += "\n"
+    
+    # Аналіз по днях
+    msg += f"*НАЙКРАЩІ ДНІ*\n"
+    days = ['Пон', 'Вів', 'Сер', 'Чет', 'Пят', 'Суб', 'Нед']
+    for day, stats in analysis['by_day'].iterrows():
+        if stats[('pnl_percent', 'count')] >= 3:
+            if stats[('pnl_percent', 'mean')] > 0:
+                msg += (f"📅 {days[day]} | "
+                       f"PnL: {stats[('pnl_percent', 'mean')]:+.2f}% | "
+                       f"угод: {int(stats[('pnl_percent', 'count')])}\n")
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
 @bot.message_handler(commands=['menu'])
 def menu_cmd(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -507,6 +557,7 @@ def menu_cmd(message):
         types.KeyboardButton('/price'),
         types.KeyboardButton('/history'),
         types.KeyboardButton('/stats'),
+        types.KeyboardButton('/analyze'),  # 👈 ДОДАЙ ЦЕ
         types.KeyboardButton('/maxprofits'),
         types.KeyboardButton('/maxlosses'),
         types.KeyboardButton('/daily'),

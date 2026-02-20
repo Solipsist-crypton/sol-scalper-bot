@@ -136,7 +136,7 @@ class ScalperBot:
             
                 klines = client.get_kline(
                     symbol=kucoin_symbol,
-                    kline_type='5min',
+                    kline_type='15min',
                     start_at=start,
                     end_at=end
                 )
@@ -260,7 +260,7 @@ class ScalperBot:
                 # 🟢 KuCoin версія
                 klines = client.get_kline(
                     symbol=kucoin_symbol,
-                    kline_type='5min',
+                    kline_type='15min',
                     start_at=int(pos.entry_time) - 60,
                     end_at=int(exit_time) + 60
                 )
@@ -401,7 +401,7 @@ class ScalperBot:
             print(f"❌ Помилка відправки в канал: {e}")
     
     def monitor_loop(self):
-        print("🤖 Моніторинг запущено. Чекаємо на перетин EMA 20/50 на 5хв...")
+        print("🤖 Моніторинг запущено. Чекаємо на перетин EMA 20/50 на 15хв...")
         print(f"📊 Трейлінг-стоп: ВИМКНЕНО (тільки сигнали EMA)")
         
         last_candle_check = 0
@@ -604,7 +604,7 @@ def crosshistory_cmd(message):
                 
                 klines = client.get_kline(
                     symbol=kucoin_symbol,
-                    kline_type='5min',
+                    kline_type='15min',
                     start_at=start_time,
                     end_at=end_time
                 )
@@ -669,7 +669,7 @@ def emastatus_cmd(message):
             
             klines = client.get_kline(
                 symbol=kucoin_symbol,
-                kline_type='5min',
+                kline_type='15min',
                 start_at=last_full_candle - 1000*60,
                 end_at=last_full_candle
             )

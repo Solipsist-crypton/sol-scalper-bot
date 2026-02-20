@@ -5,7 +5,7 @@ import os
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 CHANNEL_ID = -1003877678504  # ID каналу для копій угод
-TELEGRAM_TOKEN2 = os.getenv('TELEGRAM_TOKEN2')  # Токен другого бота
+
 
 # 🟢 KuCoin API ключі (додай в Railway Variables)
 EXCHANGE_API_KEY = os.getenv('EXCHANGE_API_KEY')

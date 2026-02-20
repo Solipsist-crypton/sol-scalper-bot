@@ -416,6 +416,87 @@ def history_cmd(message):
     else:
         bot.reply_to(message, "Історія угод порожня")
 
+
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    """Загальна статистика"""
+    analysis = db.get_detailed_analysis()
+    if not analysis:
+        bot.reply_to(message, "Немає даних для статистики")
+        return
+    
+    msg = "📊 *ЗАГАЛЬНА СТАТИСТИКА*\n\n"
+    msg += f"📈 Всього угод: {analysis['total_trades']}\n"
+    msg += f"✅ Прибуткових: {analysis['wins']}\n"
+    msg += f"❌ Збиткових: {analysis['losses']}\n"
+    msg += f"🎯 Вінрейт: {analysis['winrate']:.1f}%\n"
+    msg += f"💰 Заг. PnL: {analysis['total_pnl']:+.2f}%\n"
+    msg += f"📊 Сер. PnL: {analysis['avg_pnl']:+.2f}%\n"
+    msg += f"🏆 Краща: {analysis['best_trade']:+.2f}%\n"
+    msg += f"💔 Гірша: {analysis['worst_trade']:+.2f}%\n"
+    msg += f"⏱ Сер. час: {analysis['avg_hold']:.1f} хв"
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['maxprofits'])
+def maxprofits_cmd(message):
+    """Топ прибутків"""
+    max_profits = db.get_max_profits(limit=10)
+    if len(max_profits) > 0:
+        msg = "🏆 *ТОП-10 ПРИБУТКІВ*\n\n"
+        for i, (_, trade) in enumerate(max_profits.iterrows(), 1):
+            emoji = '🥇' if i == 1 else '🥈' if i == 2 else '🥉' if i == 3 else '📈'
+            msg += f"{emoji} *{i}. {trade['symbol']} {trade['side']}*\n"
+            msg += f"   PnL: *{trade['pnl_percent']:+.2f}%*\n"
+            msg += f"   {trade['entry_time']} → {trade['exit_time']}\n\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних")
+
+@bot.message_handler(commands=['maxlosses'])
+def maxlosses_cmd(message):
+    """Топ збитків"""
+    max_losses = db.get_max_losses(limit=10)
+    if len(max_losses) > 0:
+        msg = "💔 *ТОП-10 ЗБИТКІВ*\n\n"
+        for i, (_, trade) in enumerate(max_losses.iterrows(), 1):
+            emoji = '💀' if i == 1 else '😱' if i == 2 else '😭' if i == 3 else '📉'
+            msg += f"{emoji} *{i}. {trade['symbol']} {trade['side']}*\n"
+            msg += f"   PnL: *{trade['pnl_percent']:+.2f}%*\n"
+            msg += f"   {trade['entry_time']} → {trade['exit_time']}\n\n"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних")
+
+@bot.message_handler(commands=['daily'])
+def daily_cmd(message):
+    """Денна статистика"""
+    daily = db.get_daily_stats(days=7)
+    if len(daily) > 0:
+        msg = "📅 *ОСТАННІ 7 ДНІВ*\n\n"
+        for _, day in daily.iterrows():
+            winrate = (day['wins'] / day['total_trades'] * 100) if day['total_trades'] > 0 else 0
+            msg += (f"*{day['date']} - {day['symbol']}*\n"
+                   f"📊 Угод: {day['total_trades']} | PnL: {day['total_pnl']:+.2f}%\n"
+                   f"✅ {day['wins']} | ❌ {day['losses']} | вінрейт: {winrate:.0f}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних")
+
+@bot.message_handler(commands=['hourly'])
+def hourly_cmd(message):
+    """Годинна статистика"""
+    hourly = db.get_hourly_stats()
+    if len(hourly) > 0:
+        msg = "🕐 *ГОДИННА СТАТИСТИКА*\n\n"
+        for _, hour in hourly.iterrows():
+            if hour['total_trades'] >= 3:
+                msg += (f"*{hour['hour']:02d}:00*\n"
+                       f"📊 Угод: {hour['total_trades']} | PnL: {hour['avg_pnl']:+.2f}%\n"
+                       f"🎯 Вінрейт: {hour['winrate']}%\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Немає даних")
 @bot.message_handler(commands=['menu'])
 def menu_cmd(message):
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -426,12 +507,15 @@ def menu_cmd(message):
         types.KeyboardButton('/price'),
         types.KeyboardButton('/history'),
         types.KeyboardButton('/stats'),
+        types.KeyboardButton('/maxprofits'),
+        types.KeyboardButton('/maxlosses'),
+        types.KeyboardButton('/daily'),
+        types.KeyboardButton('/hourly'),
         types.KeyboardButton('/menu')
     ]
     markup.add(*buttons)
     bot.send_message(message.chat.id, "📱 *Меню бота (З трейлінгом)*", 
                     reply_markup=markup, parse_mode='Markdown')
-
 if __name__ == '__main__':
     try:
         print("🤖 Telegram Scalper Bot (З ТРЕЙЛІНГОМ) запущено...")

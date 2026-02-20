@@ -13,42 +13,32 @@ import sys
 import uuid
 import signal
 
-# 🆔 Унікальний ID цього екземпляра
 BOT_ID = str(uuid.uuid4())[:8]
-print(f"🆔 Запуск бота (ID: {BOT_ID})")
+print(f"🆔 Запуск бота з трейлінгом (ID: {BOT_ID})")
 
-# 📝 Файл для блокування
-LOCK_FILE = '/tmp/bot.lock'
-PID_FILE = '/tmp/bot.pid'
+LOCK_FILE = '/tmp/bot_trailing.lock'
+PID_FILE = '/tmp/bot_trailing.pid'
 
-# 🔒 Перевіряємо чи вже запущений інший екземпляр
 def check_single_instance():
     if os.path.exists(LOCK_FILE):
         try:
             with open(PID_FILE, 'r') as f:
                 old_pid = f.read().strip()
             print(f"⚠️ Бот вже запущений з PID {old_pid}")
-            print("⏹️ Зупиняємо старі процеси...")
-            if os.path.exists('/app'):
-                pass
-            else:
-                os.system("pkill -f 'python.*scalper_bot.py' || true")
+            os.system("pkill -f 'python.*scalper_bot_trailing.py' || true")
             time.sleep(3)
             os.remove(LOCK_FILE)
             os.remove(PID_FILE)
         except:
             pass
-    
     with open(LOCK_FILE, 'w') as f:
         f.write('locked')
     with open(PID_FILE, 'w') as f:
         f.write(str(os.getpid()))
-    
     print(f"✅ Екземпляр {BOT_ID} заблокував роботу")
 
 check_single_instance()
 
-# Обробник сигналів
 def signal_handler(sig, frame):
     print(f"\n🛑 Отримано сигнал {sig}, завершуємо роботу...")
     if os.path.exists(LOCK_FILE):
@@ -61,16 +51,15 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+# 🟢 Використовуємо TELEGRAM_TOKEN (той самий або інший)
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
 
-# KuCoin клієнт з API ключами
 client = Market(
     key=config.EXCHANGE_API_KEY,
     secret=config.EXCHANGE_API_SECRET,
     passphrase=config.EXCHANGE_API_PASSPHRASE
 )
 
-# Глобальний екземпляр бота
 scalper_instance = None
 
 class Position:
@@ -82,7 +71,6 @@ class Position:
         self.exit_price = None
         self.exit_time = None
         self.pnl_percent = None
-        # 🎯 Для трейлінг-стопу
         self.max_pnl = 0.0
         self.trailing_stop = None
         self.trailing_activated = False
@@ -94,11 +82,8 @@ class ScalperBot:
         self.running = True
         self.last_signal = {}
         self.last_trade_time = {}
-        # 🎯 Налаштування трейлінг-стопу
         self.check_interval = 5
-        self.fix_percent = 0.7  # 70% фіксація профіту
-        
-        # Завантажуємо стани з БД
+        self.fix_percent = 0.7
         self.load_states()
     
     def load_states(self):
@@ -116,40 +101,29 @@ class ScalperBot:
     def get_emas(self, symbol):
         try:
             kucoin_symbol = self.convert_symbol(symbol)
-            
             now = int(time.time())
             current_minute = datetime.now().minute
             last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
-            
-            # Беремо 1000 свічок (10 запитів по 100)
             all_klines = []
-            
             for i in range(10):
                 start = last_full_candle - (i+1)*100*300
                 end = last_full_candle - i*100*300 if i > 0 else last_full_candle
-                
                 klines = client.get_kline(
                     symbol=kucoin_symbol,
                     kline_type='5min',
                     start_at=start,
                     end_at=end
                 )
-                
                 if klines:
                     all_klines.extend(klines)
-                
                 time.sleep(0.2)
-            
             if not all_klines or len(all_klines) < 500:
                 return None, None, None
-            
             all_klines.sort(key=lambda x: x[0])
             closes = [float(k[2]) for k in all_klines[-500:]]
             df = pd.DataFrame(closes, columns=['close'])
-            
             ema_fast = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
             ema_slow = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-            
             return ema_fast, ema_slow, closes[-1]
         except Exception as e:
             return None, None, None
@@ -168,59 +142,45 @@ class ScalperBot:
         ema_fast, ema_slow, price = self.get_emas(symbol)
         if not ema_fast:
             return None, None, None
-        
         real_price = self.get_real_price(symbol)
         if not real_price:
             return None, None, None
-        
         current_state = 'ABOVE' if ema_fast > ema_slow else 'BELOW'
         current_time = time.time()
-        
         if symbol not in self.last_state:
             self.last_state[symbol] = current_state
             self.save_state(symbol, current_state)
             return None, None, real_price
-        
         if current_state != self.last_state[symbol]:
             if symbol in self.last_signal:
                 last_signal_type = self.last_signal[symbol]['type']
                 last_signal_time = self.last_signal[symbol]['time']
                 if signal == last_signal_type and (current_time - last_signal_time) < 30:
                     return None, None, real_price
-            
             signal = 'LONG' if current_state == 'ABOVE' else 'SHORT'
-            
             self.last_signal[symbol] = {'type': signal, 'time': current_time}
             self.last_state[symbol] = current_state
             self.save_state(symbol, current_state)
-            
             print(f"🔥 {symbol}: {signal} (ціна: {real_price:.2f})")
             return signal, current_state, real_price
-        
         return None, None, real_price
     
     def check_trailing_stop(self, symbol, current_price):
         if symbol not in self.positions:
             return False
-        
         pos = self.positions[symbol]
-        
         if pos.side == 'LONG':
             current_pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100
         else:
             current_pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100
-        
         if current_pnl > pos.max_pnl:
             pos.max_pnl = current_pnl
-            
             if pos.max_pnl >= 0.1:
                 fix_level = pos.max_pnl * self.fix_percent
                 pos.trailing_activated = True
                 pos.trailing_stop = fix_level
-        
         if pos.trailing_activated and current_pnl <= pos.trailing_stop:
             return True
-        
         return False
     
     def close_position(self, symbol, exit_price, exit_time, reason="signal"):
@@ -228,16 +188,12 @@ class ScalperBot:
             pos = self.positions[symbol]
             pos.exit_price = exit_price
             pos.exit_time = exit_time
-            
             if pos.side == 'LONG':
                 pos.pnl_percent = ((exit_price - pos.entry_price) / pos.entry_price) * 100
             else:
                 pos.pnl_percent = ((pos.entry_price - exit_price) / pos.entry_price) * 100
-            
-            # Рахуємо максимальний профіт за угоду
             max_price = 0
             min_price = float('inf')
-            
             try:
                 kucoin_symbol = self.convert_symbol(symbol)
                 klines = client.get_kline(
@@ -246,7 +202,6 @@ class ScalperBot:
                     start_at=int(pos.entry_time) - 60,
                     end_at=int(exit_time) + 60
                 )
-                
                 if klines:
                     for k in klines:
                         high = float(k[3])
@@ -258,14 +213,11 @@ class ScalperBot:
             except:
                 max_price = exit_price
                 min_price = exit_price
-            
             if pos.side == 'LONG':
                 max_pnl = ((max_price - pos.entry_price) / pos.entry_price) * 100
             else:
                 max_pnl = ((pos.entry_price - min_price) / pos.entry_price) * 100
-            
             hold_minutes = (exit_time - pos.entry_time) / 60
-            
             trade_info = {
                 'symbol': symbol,
                 'side': pos.side,
@@ -278,11 +230,9 @@ class ScalperBot:
                 'exit_time': datetime.fromtimestamp(exit_time).strftime('%H:%M:%S'),
                 'exit_reason': reason
             }
-            
             db.add_trade(trade_info)
             self.send_to_channel(trade_info)
             self.send_trade_result(trade_info, reason)
-            
             del self.positions[symbol]
             return trade_info
         return None
@@ -290,14 +240,12 @@ class ScalperBot:
     def open_position(self, symbol, side, price, current_time):
         self.positions[symbol] = Position(symbol, side, price, current_time)
         self.last_trade_time[symbol] = current_time
-        
         if price < 1:
             price_str = f"{price:.4f}"
         elif price < 10:
             price_str = f"{price:.3f}"
         else:
             price_str = f"{price:.2f}"
-        
         msg = (f"🆓 *НОВА ПОЗИЦІЯ*\n"
                f"Монета: {symbol}\n"
                f"Напрямок: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
@@ -309,15 +257,12 @@ class ScalperBot:
         emoji = '✅' if trade['pnl'] > 0 else '❌'
         reason_emoji = "🎯" if reason == "trailing" else "📊"
         reason_text = "трейлінг-стоп" if reason == "trailing" else "сигнал EMA"
-        
         if trade['entry'] < 1 or trade['exit'] < 1:
             price_format = ".4f"
         else:
             price_format = ".2f"
-        
         entry_price = f"{trade['entry']:{price_format}}"
         exit_price = f"{trade['exit']:{price_format}}"
-        
         msg = (f"{emoji} *РЕЗУЛЬТАТ УГОДИ*\n"
                f"Монета: {trade['symbol']}\n"
                f"Тип: {'🟢 LONG' if trade['side'] == 'LONG' else '🔴 SHORT'}\n"
@@ -333,18 +278,14 @@ class ScalperBot:
         try:
             if not hasattr(config, 'CHANNEL_ID') or not config.CHANNEL_ID:
                 return
-            
             if trade_info['entry'] < 1 or trade_info['exit'] < 1:
                 price_format = ".4f"
             else:
                 price_format = ".2f"
-            
             entry_price = f"{trade_info['entry']:{price_format}}"
             exit_price = f"{trade_info['exit']:{price_format}}"
-            
             emoji = '✅' if trade_info['pnl'] > 0 else '❌'
             reason_emoji = "🎯" if trade_info.get('exit_reason') == 'trailing' else "📊"
-            
             msg = (f"{emoji} *УГОДА*\n"
                    f"Монета: {trade_info['symbol']}\n"
                    f"Тип: {'🟢 LONG' if trade_info['side'] == 'LONG' else '🔴 SHORT'}\n"
@@ -354,19 +295,14 @@ class ScalperBot:
                    f"{reason_emoji} {trade_info.get('exit_reason', 'signal')}\n"
                    f"⏱ {trade_info['hold_minutes']:.1f} хв\n"
                    f"🕒 {trade_info['entry_time']} → {trade_info['exit_time']}")
-            
             bot.send_message(config.CHANNEL_ID, msg, parse_mode='Markdown')
         except Exception as e:
             print(f"❌ Помилка каналу: {e}")
     
     def monitor_loop(self):
-        print("🤖 Моніторинг запущено...")
-        print(f"📊 Трейлінг 70% активовано")
-        
+        print("🤖 Моніторинг запущено (З ТРЕЙЛІНГОМ)...")
         while self.running:
             current_time = time.time()
-            
-            # Спочатку перевіряємо трейлінг
             for symbol in list(self.positions.keys()):
                 try:
                     current_price = self.get_real_price(symbol)
@@ -374,48 +310,38 @@ class ScalperBot:
                         self.close_position(symbol, current_price, current_time, "trailing")
                 except:
                     pass
-            
-            # Потім перевіряємо сигнали
             for symbol in config.SYMBOLS:
                 try:
                     signal, state, price = self.check_crossover(symbol)
-                    
                     if signal:
                         if symbol in self.positions:
                             current_pos = self.positions[symbol]
-                            
                             if (current_pos.side == 'LONG' and signal == 'SHORT') or \
                                (current_pos.side == 'SHORT' and signal == 'LONG'):
                                 self.close_position(symbol, price, current_time, "signal")
                                 time.sleep(1)
                                 self.open_position(symbol, signal, price, current_time)
-                        
                         else:
                             self.open_position(symbol, signal, price, current_time)
                 except:
                     pass
-            
             time.sleep(self.check_interval)
 
 # ===== КОМАНДИ TELEGRAM =====
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     global scalper_instance
-    
     if scalper_instance and scalper_instance.running:
         scalper_instance.running = False
         time.sleep(2)
-    
     scalper_instance = ScalperBot()
     thread = threading.Thread(target=scalper_instance.monitor_loop, daemon=True)
     thread.start()
-    
-    bot.reply_to(message, "🚀 Бот запущено! Трейлінг 70% активовано")
+    bot.reply_to(message, "🚀 Бот (З трейлінгом) запущено!")
 
 @bot.message_handler(commands=['stop'])
 def stop_cmd(message):
     global scalper_instance
-    
     if scalper_instance and scalper_instance.running:
         scalper_instance.running = False
         scalper_instance = None
@@ -427,25 +353,21 @@ def stop_cmd(message):
 def status_cmd(message):
     global scalper_instance
     if scalper_instance and scalper_instance.positions:
-        msg = "📊 *Активні позиції:*\n"
+        msg = "📊 *Активні позиції (З трейлінгом):*\n"
         for symbol, pos in scalper_instance.positions.items():
             current_price = scalper_instance.get_real_price(symbol) or 0
             if pos.side == 'LONG':
                 pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100
             else:
                 pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100
-            
             hold_time = (time.time() - pos.entry_time) / 60
-            
             if pos.entry_price < 1:
                 entry_str = f"{pos.entry_price:.4f}"
             elif pos.entry_price < 10:
                 entry_str = f"{pos.entry_price:.3f}"
             else:
                 entry_str = f"{pos.entry_price:.2f}"
-            
             trailing_info = f" | фікс: {pos.trailing_stop:.2f}%" if pos.trailing_activated else ""
-            
             msg += (f"\n{symbol}: {'🟢 LONG' if pos.side == 'LONG' else '🔴 SHORT'}\n"
                     f"Вхід: ${entry_str}\n"
                     f"PnL: {pnl:+.2f}%{trailing_info}\n"
@@ -454,18 +376,68 @@ def status_cmd(message):
     else:
         bot.reply_to(message, "Немає активних позицій")
 
-# Інші команди скорочені для лаконічності, але залишаються робочими
+@bot.message_handler(commands=['price'])
+def price_cmd(message):
+    try:
+        msg = "💰 *Поточні ціни:*\n"
+        for symbol in config.SYMBOLS:
+            price = scalper_instance.get_real_price(symbol) if scalper_instance else None
+            if price:
+                if price < 1:
+                    price_str = f"{price:.4f}"
+                elif price < 10:
+                    price_str = f"{price:.3f}"
+                else:
+                    price_str = f"{price:.2f}"
+                msg += f"\n{symbol}: ${price_str}"
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Помилка: {e}")
+
+@bot.message_handler(commands=['history'])
+def history_cmd(message):
+    trades = db.get_trades(limit=10)
+    if len(trades) > 0:
+        msg = "📜 *Останні 10 угод:*\n\n"
+        for _, trade in trades.iterrows():
+            emoji = '✅' if trade['pnl_percent'] > 0 else '❌'
+            reason_emoji = "🎯" if trade.get('exit_reason') == 'trailing' else "📊"
+            if trade['entry_price'] < 1 or trade['exit_price'] < 1:
+                entry_str = f"{trade['entry_price']:.4f}"
+                exit_str = f"{trade['exit_price']:.4f}"
+            else:
+                entry_str = f"{trade['entry_price']:.2f}"
+                exit_str = f"{trade['exit_price']:.2f}"
+            msg += (f"{emoji} {trade['symbol']} {trade['side']}\n"
+                   f"PnL: {trade['pnl_percent']:+.2f}% | {reason_emoji}\n"
+                   f"${entry_str} → ${exit_str}\n"
+                   f"{trade['entry_time']} → {trade['exit_time']}\n\n")
+        bot.reply_to(message, msg, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "Історія угод порожня")
+
+@bot.message_handler(commands=['menu'])
+def menu_cmd(message):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        types.KeyboardButton('/start'),
+        types.KeyboardButton('/stop'),
+        types.KeyboardButton('/status'),
+        types.KeyboardButton('/price'),
+        types.KeyboardButton('/history'),
+        types.KeyboardButton('/stats'),
+        types.KeyboardButton('/menu')
+    ]
+    markup.add(*buttons)
+    bot.send_message(message.chat.id, "📱 *Меню бота (З трейлінгом)*", 
+                    reply_markup=markup, parse_mode='Markdown')
 
 if __name__ == '__main__':
     try:
-        print("🤖 Telegram Scalper Bot запущено...")
+        print("🤖 Telegram Scalper Bot (З ТРЕЙЛІНГОМ) запущено...")
         print(f"Моніторинг: {config.SYMBOLS}")
         print(f"EMA 20/50 на 5хв | Трейлінг 70%")
-        if hasattr(config, 'CHANNEL_ID') and config.CHANNEL_ID:
-            print(f"📤 Канал: {config.CHANNEL_ID}")
-        
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
-        
     except Exception as e:
         print(f"❌ Помилка: {e}")
     finally:

@@ -417,7 +417,21 @@ def status_cmd(message):
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
         bot.reply_to(message, "Немає активних позицій")
-
+@bot.message_handler(commands=['menu'])
+def menu_cmd(message):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        types.KeyboardButton('/start'),
+        types.KeyboardButton('/stop'),
+        types.KeyboardButton('/status'),
+        types.KeyboardButton('/price'),
+        types.KeyboardButton('/history'),
+        types.KeyboardButton('/stats'),
+        types.KeyboardButton('/menu')
+    ]
+    markup.add(*buttons)
+    bot.send_message(message.chat.id, "📱 *Меню бота (БЕЗ трейлінгу)*", 
+                    reply_markup=markup, parse_mode='Markdown')
 if __name__ == '__main__':
     try:
         print("🤖 Telegram Scalper Bot (БЕЗ ТРЕЙЛІНГУ) запущено...")

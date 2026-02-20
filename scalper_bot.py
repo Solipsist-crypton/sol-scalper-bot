@@ -468,8 +468,9 @@ def price_cmd(message):
     try:
         msg = "💰 *Поточні ціни та EMA (KuCoin):*\n"
         for symbol in config.SYMBOLS:
-            # Отримуємо EMA
-            ema_fast, ema_slow, _ = scalper_instance.get_emas(symbol) if scalper_instance else (None, None, None)
+            # Отримуємо EMA безпосередньо
+            temp_bot = ScalperBot()  # Тимчасовий бот для отримання EMA
+            ema_fast, ema_slow, _ = temp_bot.get_emas(symbol)
             
             # Отримуємо реальну ціну
             kucoin_symbol = symbol.replace('USDT', '-USDT')
@@ -596,7 +597,7 @@ def crosshistory_cmd(message):
         for symbol in config.SYMBOLS:
             kucoin_symbol = symbol.replace('USDT', '-USDT')
             
-            # Беремо 2000 свічок для історії
+            # Беремо 1000 свічок для історії
             end_time = int(time.time())
             start_time = end_time - 7*24*3600
             
@@ -608,10 +609,10 @@ def crosshistory_cmd(message):
             )
             
             if not klines or len(klines) < 200:
-                msg += f"*{symbol}* – недостатньо даних\n\n"
+                msg += f"*{symbol}* – недостатньо даних ({len(klines) if klines else 0} свічок)\n\n"
                 continue
             
-            closes = [float(k[2]) for k in klines]  # KuCoin: індекс 2 = close
+            closes = [float(k[2]) for k in klines]
             df = pd.DataFrame(closes, columns=['close'])
             df['ema20'] = df['close'].ewm(span=20).mean()
             df['ema50'] = df['close'].ewm(span=50).mean()
@@ -623,11 +624,9 @@ def crosshistory_cmd(message):
                 curr_state = df['ema20'].iloc[i] > df['ema50'].iloc[i]
                 
                 if prev_state != curr_state:
-                    # Час закриття свічки
                     close_time = int(klines[i][0]) + 300
-                    local_time = close_time + 7200  # +2 години для Києва
+                    local_time = close_time + 7200
                     time_str = datetime.fromtimestamp(local_time).strftime('%H:%M %d.%m')
-                    
                     signal = 'LONG' if curr_state else 'SHORT'
                     price = df['close'].iloc[i]
                     crosses.append(f"{time_str} - {signal} @ ${price:.2f}")
@@ -637,7 +636,7 @@ def crosshistory_cmd(message):
                 for cross in crosses[-10:]:
                     msg += f"   {cross}\n"
             else:
-                msg += "   За 7 днів перетинів не виявлено\n"
+                msg += f"   За 7 днів перетинів не виявлено (проаналізовано {len(klines)} свічок)\n"
             msg += "\n"
         
         bot.reply_to(message, msg, parse_mode='Markdown')

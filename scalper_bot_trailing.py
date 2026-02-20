@@ -89,14 +89,16 @@ class ScalperBot:
         self.set_bot_commands()
         self.init_telegram_handlers()
         
-        # Автозапуск моніторингу в окремому потоці
+        # Потоки управління
         threading.Thread(target=self.run, daemon=True).start()
         threading.Thread(target=self.daily_report_loop, daemon=True).start()
+        threading.Thread(target=self.heartbeat_loop, daemon=True).start()
 
     def set_bot_commands(self):
         try:
             commands = [
                 types.BotCommand("status", "🔍 Активні позиції"),
+                types.BotCommand("check", "⚡️ RSI зараз (Перевірка роботи)"),
                 types.BotCommand("stats", "📊 Статистика закриттів"),
                 types.BotCommand("report", "📅 Звіт за вчора"),
                 types.BotCommand("start", "♻️ Перезапустити меню")
@@ -225,6 +227,25 @@ class ScalperBot:
         emoji = '✅' if net_pnl > 0 else '❌'
         bot.send_message(config.CHAT_ID, f"{emoji} *ЗАКРИТО: {reason}*\nМонета: `{symbol}`\nPnL: *{net_pnl:+.2f}%*", parse_mode='Markdown')
 
+    # ===== МОНІТОРИНГ ПРАЦЕЗДАТНОСТІ =====
+    def heartbeat_loop(self):
+        while self.running:
+            time.sleep(3600) # Кожну годину
+            self.send_status_update()
+
+    def send_status_update(self):
+        text = "🤖 *Звіт про роботу бота*\n━━━━━━━━━━━━━━━\n"
+        for symbol in config.SYMBOLS:
+            data = self.get_market_data(symbol)
+            if data:
+                rsi = data['rsi']
+                emoji = "📉" if rsi < 35 else ("📈" if rsi > 65 else "⚖️")
+                text += f"{emoji} `{symbol}`: RSI = *{rsi:.2f}*\n"
+        text += "━━━━━━━━━━━━━━━\n🚥 Бот працює, чекаю сигнали."
+        try: bot.send_message(config.CHAT_ID, text, parse_mode='Markdown')
+        except: pass
+
+    # ===== ЗВІТНІСТЬ =====
     def daily_report_loop(self):
         while self.running:
             now = datetime.now()
@@ -250,7 +271,7 @@ class ScalperBot:
         @bot.message_handler(commands=['start'])
         def welcome(m):
             self.set_bot_commands()
-            bot.reply_to(m, "🤖 Бот RSI Pro у роботі! Керуйте через Menu.")
+            bot.reply_to(m, "🤖 Бот RSI Pro активований! Керуйте через Menu.")
 
         @bot.message_handler(commands=['status'])
         def status_cmd(m):
@@ -259,6 +280,10 @@ class ScalperBot:
             for s, p in self.positions.items():
                 res += f"\n`{s}` | {p.side} | Max: {p.max_pnl:.2f}%"
             bot.reply_to(m, res, parse_mode='Markdown')
+
+        @bot.message_handler(commands=['check'])
+        def check_now(m):
+            self.send_status_update()
 
         @bot.message_handler(commands=['stats'])
         def stats_cmd(m):
@@ -282,5 +307,5 @@ class ScalperBot:
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("🚀 Запуск Scalper Bot...")
-    bot_instance = ScalperBot() # Створюємо екземпляр класу
-    bot.infinity_polling()      # Запускаємо слухача повідомлень
+    bot_instance = ScalperBot()
+    bot.infinity_polling()

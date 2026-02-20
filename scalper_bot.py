@@ -127,54 +127,40 @@ class ScalperBot:
             current_minute = datetime.now().minute
             last_full_candle = now - (current_minute % 5 * 60) - (now % 60) - 300
         
-            print(f"🕐 Час останньої свічки: {datetime.fromtimestamp(last_full_candle).strftime('%H:%M:%S')}")
-        
-            # 🟢 Робимо ДВА запити по 100 свічок
+            # 🟢 Беремо 1000 свічок (10 запитів по 100)
             all_klines = []
         
-            # Перший запит - останні 100 свічок
-            klines1 = client.get_kline(
-                symbol=kucoin_symbol,
-                kline_type='5min',
-                start_at=last_full_candle - 100*300,  # 100 свічок * 5 хв = 500 хвилин
-                end_at=last_full_candle
-            )
-        
-            if klines1:
-                all_klines.extend(klines1)
-            print(f"📊 Перший запит: {len(klines1)} свічок")
-        
-            # Другий запит - попередні 100 свічок
-            if len(all_klines) < 200:
-                klines2 = client.get_kline(
+            for i in range(10):
+                start = last_full_candle - (i+1)*100*300
+                end = last_full_candle - i*100*300 if i > 0 else last_full_candle
+            
+                klines = client.get_kline(
                     symbol=kucoin_symbol,
                     kline_type='5min',
-                    start_at=last_full_candle - 200*300,  # 200 свічок * 5 хв = 1000 хвилин
-                    end_at=last_full_candle - 100*300 - 1
+                    start_at=start,
+                    end_at=end
                 )
             
-                if klines2:
-                    all_klines.extend(klines2)
-                    print(f"📊 Другий запит: {len(klines2)} свічок")
+                if klines:
+                    all_klines.extend(klines)
+                    print(f"📊 Запит {i+1}: {len(klines)} свічок")
+            
+                time.sleep(0.2)  # Пауза між запитами
         
             if not all_klines:
-                print(f"⚠️ Немає даних для {symbol}")
+                print(f"❌ Немає даних для {symbol}")
                 return None, None, None
         
-            # Сортуємо за часом (від старих до нових)
+            # Сортуємо за часом
             all_klines.sort(key=lambda x: x[0])
-        
             print(f"📊 Всього отримано: {len(all_klines)} свічок")
         
-            if len(all_klines) < 150:  # Зменшуємо вимогу до 150 свічок
-                print(f"⚠️ Недостатньо даних для {symbol}: {len(all_klines)} свічок (потрібно 150+)")
+            if len(all_klines) < 500:
+                print(f"⚠️ Недостатньо даних: {len(all_klines)}")
                 return None, None, None
         
-            # Беремо останні 150 свічок
-            all_klines = all_klines[-150:]
-            closes = [float(k[2]) for k in all_klines]
-            print(f"📈 Перша ціна: {closes[0]:.2f}, остання ціна: {closes[-1]:.2f}")
-        
+            # Беремо останні 500 свічок для швидкодії
+            closes = [float(k[2]) for k in all_klines[-500:]]
             df = pd.DataFrame(closes, columns=['close'])
         
             ema_fast = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
@@ -185,8 +171,6 @@ class ScalperBot:
             return ema_fast, ema_slow, closes[-1]
         except Exception as e:
             print(f"❌ Помилка {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
             return None, None, None
     
     def get_real_price(self, symbol):

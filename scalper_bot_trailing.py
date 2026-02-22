@@ -3,7 +3,6 @@ import telebot
 from telebot import types
 from kucoin.client import Market
 import pandas as pd
-import numpy as np
 import time
 import threading
 from datetime import datetime
@@ -60,17 +59,16 @@ class Position:
 class ScalperBot:
     def __init__(self):
         self.positions = {}
-        # --- НАЛАШТУВАННЯ БАЛАНСУ ---
-        self.stop_loss_pct = 1.1        # Трохи ширше, щоб не вибило шумом
-        self.trailing_activation = 0.55 # Активуємо при +0.55%
-        self.trailing_distance = 0.35   # Відступ трейлінга
-        self.ad_min = 18                # М'який ADX (для активності)
-
+        # --- ОПТИМІЗОВАНІ НАЛАШТУВАННЯ ---
+        self.stop_loss_pct = 1.2        # Стоп трохи ширше для 5хв
+        self.trailing_activation = 0.5  # Активуємо при +0.5% (швидкий зачеп)
+        self.trailing_distance = 0.35   # Відступ
+        
         try:
             bot.set_my_commands([
                 types.BotCommand("status", "📊 PnL та позиції"),
                 types.BotCommand("report", "📅 Звіт"),
-                types.BotCommand("check", "📡 Стан")
+                types.BotCommand("check", "📡 Стан системи")
             ])
         except: pass
 
@@ -82,22 +80,15 @@ class ScalperBot:
             k = client.get_kline(symbol=symbol.replace('USDT', '-USDT'), kline_type='5min', limit=100)
             df = pd.DataFrame(k, columns=['time','open','close','high','low','vol','amt']).astype(float).sort_values('time')
             
-            # EMA 20/50
+            # Тільки необхідні індикатори
             df['f'] = df['close'].ewm(span=20, adjust=False).mean()
             df['s'] = df['close'].ewm(span=50, adjust=False).mean()
             
-            # RSI
+            # RSI для простого фільтра
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14).mean()
             loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14).mean()
             df['rsi'] = 100 - (100 / (1 + (gain / loss)))
-            
-            # ADX (Сила тренду)
-            tr = pd.concat([df['high'] - df['low'], abs(df['high'] - df['close'].shift(1)), abs(df['low'] - df['close'].shift(1))], axis=1).max(axis=1)
-            atr = tr.ewm(span=14).mean()
-            plus_dm = (df['high'].diff()).where(lambda x: (x > df['low'].diff().abs()) & (x > 0), 0).ewm(span=14).mean()
-            minus_dm = (df['low'].diff().abs()).where(lambda x: (x > df['high'].diff()) & (x > 0), 0).ewm(span=14).mean()
-            df['adx'] = (100 * (abs(plus_dm - minus_dm) / (plus_dm + minus_dm + 1e-10))).ewm(span=14).mean()
             
             return df
         except: return None
@@ -106,29 +97,29 @@ class ScalperBot:
         for symbol in SYMBOLS:
             if symbol in self.positions: continue
             df = self.get_data(symbol)
-            if df is None or len(df) < 60: continue
+            if df is None or len(df) < 55: continue
             
             last, prev = df.iloc[-1], df.iloc[-2]
+            rsi = last['rsi']
             
-            # Фільтр: наявність хоч якогось тренду та розрив між EMA (відступ 0.03%)
-            gap = abs(last['f'] - last['s']) / last['s'] * 100
-            trend_ok = last['adx'] > self.ad_min and gap > 0.03
-
+            # ЛОГІКА: Перетин + фільтр RSI (щоб не купувати перегріте)
+            # Прибрали ADX і жорсткі Gap фільтри для активності
+            
             # LONG
-            if prev['f'] <= prev['s'] and last['f'] > last['s'] and trend_ok:
-                if last['rsi'] < 65:
+            if prev['f'] <= prev['s'] and last['f'] > last['s']:
+                if rsi < 70: # Тільки якщо не в зоні перекупленості
                     sl = last['close'] * (1 - self.stop_loss_pct/100)
                     self.positions[symbol] = Position(symbol, 'LONG', last['close'], sl)
-                    bot.send_message(config.CHAT_ID, f"🎯 *LONG* #{symbol}\nADX: `{last['adx']:.1f}` | RSI: `{last['rsi']:.1f}`")
+                    bot.send_message(config.CHAT_ID, f"🎯 *LONG* #{symbol}\nRSI: `{rsi:.1f}`")
             
             # SHORT
-            elif prev['f'] >= prev['s'] and last['f'] < last['s'] and trend_ok:
-                if last['rsi'] > 35:
+            elif prev['f'] >= prev['s'] and last['f'] < last['s']:
+                if rsi > 30: # Тільки якщо не в зоні перепроданості
                     sl = last['close'] * (1 + self.stop_loss_pct/100)
                     self.positions[symbol] = Position(symbol, 'SHORT', last['close'], sl)
-                    bot.send_message(config.CHAT_ID, f"🎯 *SHORT* #{symbol}\nADX: `{last['adx']:.1f}` | RSI: `{last['rsi']:.1f}`")
+                    bot.send_message(config.CHAT_ID, f"🎯 *SHORT* #{symbol}\nRSI: `{rsi:.1f}`")
             
-            time.sleep(0.1)
+            time.sleep(0.15)
 
     def monitor_positions(self):
         for symbol in list(self.positions.keys()):
@@ -141,6 +132,7 @@ class ScalperBot:
 
             if pnl >= self.trailing_activation and not pos.trailing_active:
                 pos.trailing_active = True
+                bot.send_message(config.CHAT_ID, f"🛡 #{symbol}: Трейлінг активовано!")
                 
             if pos.trailing_active:
                 if pos.side == 'LONG':
@@ -161,13 +153,13 @@ class ScalperBot:
                 reason = "TRAILING" if pos.trailing_active else "STOP_LOSS"
                 db.save_trade(symbol, pos.side, final_pnl, reason)
                 self.positions.pop(symbol)
-                bot.send_message(config.CHAT_ID, f"{'💎' if final_pnl > 0 else '💀'} *ЗАКРИТО ({reason})*\n#{symbol} | PnL: `{final_pnl:+.2f}%`")
+                bot.send_message(config.CHAT_ID, f"{'🟢' if final_pnl > 0 else '🔴'} *ЗАКРИТО ({reason})*\n#{symbol} | PnL: `{final_pnl:+.2f}%`")
 
     def init_handlers(self):
         @bot.message_handler(commands=['status'])
         def status_cmd(m):
-            if not self.positions: return bot.reply_to(m, "Угод немає. Чекаю сигнал...")
-            msg = "📊 *ПОТОЧНИЙ PnL:*\n"
+            if not self.positions: return bot.reply_to(m, "Угод немає. Моніторю ринок...")
+            msg = "📊 *АКТИВНІ УГОДИ:*\n"
             for s, p in self.positions.items():
                 df = self.get_data(s); curr_p = df.iloc[-1]['close'] if df is not None else p.entry_price
                 pnl = ((curr_p - p.entry_price) / p.entry_price * 100) if p.side == 'LONG' else ((p.entry_price - curr_p) / p.entry_price * 100)
@@ -183,15 +175,17 @@ class ScalperBot:
 
         @bot.message_handler(commands=['check'])
         def check_cmd(m):
-            bot.send_message(m.chat.id, f"📡 *STATUS:* OK\nADX Filter: `{self.ad_min}`\nSL: `{self.stop_loss_pct}%`")
+            bot.send_message(m.chat.id, f"📡 *STATUS:* ACTIVE\nТаймфрейм: `5min`\nАктивних монет: `{len(SYMBOLS)}`")
 
     def run(self):
         while self.running:
             try:
                 self.monitor_positions(); self.check_signals()
-                time.sleep(15)
-            except: time.sleep(15)
+                time.sleep(10)
+            except Exception as e:
+                print(f"Loop Error: {e}")
+                time.sleep(10)
 
 if __name__ == '__main__':
-    print("🚀 Sniper V2.0 запущен...")
+    print("🚀 Sniper V2.1 Light запущен...")
     bot_instance = ScalperBot(); bot.infinity_polling()

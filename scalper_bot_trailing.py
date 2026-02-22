@@ -3,13 +3,14 @@ import telebot
 from telebot import types
 from kucoin.client import Market
 import pandas as pd
+import numpy as np
 import time
 import threading
 from datetime import datetime
 import config
 import sqlite3
 
-# ===== БАЗА ДАНИХ =====
+# ===== DATABASE (Оновлена для стратегій) =====
 class StatsDB:
     def __init__(self):
         self.conn = sqlite3.connect("trading_stats.db", check_same_thread=False)
@@ -18,60 +19,43 @@ class StatsDB:
     def create_tables(self):
         cursor = self.conn.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS trades 
-                          (symbol TEXT, side TEXT, pnl REAL, exit_time TIMESTAMP, exit_reason TEXT)''')
+                          (symbol TEXT, strategy TEXT, side TEXT, pnl REAL, exit_time TIMESTAMP)''')
         self.conn.commit()
 
-    def save_trade(self, symbol, side, pnl, reason):
+    def save_trade(self, symbol, strategy, side, pnl):
         cursor = self.conn.cursor()
-        cursor.execute("INSERT INTO trades VALUES (?, ?, ?, ?, ?)", 
-                       (symbol, side, pnl, datetime.now(), reason))
+        cursor.execute("INSERT INTO trades (symbol, strategy, side, pnl, exit_time) VALUES (?, ?, ?, ?, ?)", 
+                       (symbol, strategy, side, pnl, datetime.now()))
         self.conn.commit()
 
-    def get_hourly_report(self):
+    def get_report(self):
         cursor = self.conn.cursor()
-        cursor.execute("SELECT strftime('%H', exit_time) as hr, SUM(pnl), COUNT(*) FROM trades GROUP BY hr ORDER BY hr")
-        return cursor.fetchall()
-
-    def get_daily_report(self):
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT date(exit_time) as dt, SUM(pnl) FROM trades GROUP BY dt ORDER BY dt DESC LIMIT 7")
+        # Статистика по кожній стратегії окремо
+        cursor.execute("SELECT strategy, SUM(pnl), COUNT(*) FROM trades GROUP BY strategy")
         return cursor.fetchall()
 
 db = StatsDB()
 
-# ===== ІНІЦІАЛІЗАЦІЯ =====
+# ===== BOT SETUP =====
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
 client = Market(key=config.EXCHANGE_API_KEY, secret=config.EXCHANGE_API_SECRET, passphrase=config.EXCHANGE_API_PASSPHRASE)
 
-SYMBOLS = [
-    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'LINKUSDT', 'ADAUSDT', 'DOTUSDT', 'NEARUSDT',
-    'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'TIAUSDT', 'INJUSDT', 'ORDIUSDT', 'FETUSDT',
-    'MATICUSDT', 'LTCUSDT', 'BCHUSDT', 'XRPUSDT', 'UNIUSDT', 'AAVEUSDT', 'GALAUSDT'
-]
+SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'LINKUSDT', 'ADAUSDT', 'NEARUSDT', 'BCHUSDT', 'LTCUSDT', 'XRPUSDT']
 
 class Position:
-    def __init__(self, symbol, side, price, sl):
-        self.symbol, self.side, self.entry_price = symbol, side, price
+    def __init__(self, symbol, strategy, side, price, sl):
+        self.symbol = symbol
+        self.strategy = strategy
+        self.side = side
+        self.entry_price = price
         self.stop_loss = sl
-        self.max_p, self.min_p = price, price
+        self.max_p = price
+        self.min_p = price
         self.trailing_active = False
 
-class ScalperBot:
+class MultiStrategyBot:
     def __init__(self):
         self.positions = {}
-        # --- ОПТИМІЗОВАНІ НАЛАШТУВАННЯ ---
-        self.stop_loss_pct = 1.2        # Стоп трохи ширше для 5хв
-        self.trailing_activation = 0.5  # Активуємо при +0.5% (швидкий зачеп)
-        self.trailing_distance = 0.35   # Відступ
-        
-        try:
-            bot.set_my_commands([
-                types.BotCommand("status", "📊 PnL та позиції"),
-                types.BotCommand("report", "📅 Звіт"),
-                types.BotCommand("check", "📡 Стан системи")
-            ])
-        except: pass
-
         self.init_handlers()
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -79,17 +63,11 @@ class ScalperBot:
         try:
             k = client.get_kline(symbol=symbol.replace('USDT', '-USDT'), kline_type='5min', limit=100)
             df = pd.DataFrame(k, columns=['time','open','close','high','low','vol','amt']).astype(float).sort_values('time')
-            
-            # Тільки необхідні індикатори
-            df['f'] = df['close'].ewm(span=20, adjust=False).mean()
-            df['s'] = df['close'].ewm(span=50, adjust=False).mean()
-            
-            # RSI для простого фільтра
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14).mean()
-            loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14).mean()
-            df['rsi'] = 100 - (100 / (1 + (gain / loss)))
-            
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            df['avg_vol'] = df['vol'].rolling(20).mean()
+            df['max_high'] = df['high'].rolling(50).max().shift(1) # Для пробоїв
+            df['min_low'] = df['low'].rolling(50).min().shift(1)
             return df
         except: return None
 
@@ -97,95 +75,90 @@ class ScalperBot:
         for symbol in SYMBOLS:
             if symbol in self.positions: continue
             df = self.get_data(symbol)
-            if df is None or len(df) < 55: continue
+            if df is None or len(df) < 60: continue
             
-            last, prev = df.iloc[-1], df.iloc[-2]
-            rsi = last['rsi']
+            curr = df.iloc[-1]
+            prev = df.iloc[-2]
+            vol_ok = curr['vol'] > curr['avg_vol'] * 1.3
             
-            # ЛОГІКА: Перетин + фільтр RSI (щоб не купувати перегріте)
-            # Прибрали ADX і жорсткі Gap фільтри для активності
-            
-            # LONG
-            if prev['f'] <= prev['s'] and last['f'] > last['s']:
-                if rsi < 70: # Тільки якщо не в зоні перекупленості
-                    sl = last['close'] * (1 - self.stop_loss_pct/100)
-                    self.positions[symbol] = Position(symbol, 'LONG', last['close'], sl)
-                    bot.send_message(config.CHAT_ID, f"🎯 *LONG* #{symbol}\nRSI: `{rsi:.1f}`")
-            
-            # SHORT
-            elif prev['f'] >= prev['s'] and last['f'] < last['s']:
-                if rsi > 30: # Тільки якщо не в зоні перепроданості
-                    sl = last['close'] * (1 + self.stop_loss_pct/100)
-                    self.positions[symbol] = Position(symbol, 'SHORT', last['close'], sl)
-                    bot.send_message(config.CHAT_ID, f"🎯 *SHORT* #{symbol}\nRSI: `{rsi:.1f}`")
-            
-            time.sleep(0.15)
+            # --- 1. STRATEGY: BOUNCE (Відскок від EMA 20) ---
+            if curr['ema20'] > curr['ema50'] and curr['low'] <= curr['ema20'] and curr['close'] > curr['ema20'] and vol_ok:
+                self.open_pos(symbol, "BOUNCE", "LONG", curr['close'], curr['low'] * 0.995)
+                continue
+
+            # --- 2. STRATEGY: BREAKOUT (Пробій рівня) ---
+            if curr['close'] > curr['max_high'] and vol_ok:
+                self.open_pos(symbol, "BREAKOUT", "LONG", curr['close'], curr['close'] * 0.99)
+                continue
+            elif curr['close'] < curr['min_low'] and vol_ok:
+                self.open_pos(symbol, "BREAKOUT", "SHORT", curr['close'], curr['close'] * 1.01)
+                continue
+
+            # --- 3. STRATEGY: PATTERN (Поглинання) ---
+            # Буча поглинання: поточна зелена свічка перекриває попередню червону
+            if curr['close'] > prev['open'] and curr['open'] < prev['close'] and prev['close'] < prev['open'] and vol_ok:
+                self.open_pos(symbol, "PATTERN", "LONG", curr['close'], curr['low'] * 0.995)
+
+            time.sleep(0.1)
+
+    def open_pos(self, symbol, strategy, side, price, sl):
+        self.positions[symbol] = Position(symbol, strategy, side, price, sl)
+        bot.send_message(config.CHAT_ID, f"🚀 *{strategy} {side}*\n#{symbol} | Ціна: `{price}`")
 
     def monitor_positions(self):
         for symbol in list(self.positions.keys()):
             pos = self.positions[symbol]
             df = self.get_data(symbol)
             if df is None: continue
-            curr_p = df.iloc[-1]['close']
+            price = df.iloc[-1]['close']
             
-            pnl = ((curr_p - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else ((pos.entry_price - curr_p) / pos.entry_price * 100)
+            pnl = ((price - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else ((pos.entry_price - price) / pos.entry_price * 100)
 
-            if pnl >= self.trailing_activation and not pos.trailing_active:
-                pos.trailing_active = True
-                bot.send_message(config.CHAT_ID, f"🛡 #{symbol}: Трейлінг активовано!")
-                
+            # Простий трейлінг (активація при +0.5%)
+            if pnl > 0.5: pos.trailing_active = True
             if pos.trailing_active:
                 if pos.side == 'LONG':
-                    if curr_p > pos.max_p:
-                        pos.max_p = curr_p
-                        new_sl = curr_p * (1 - self.trailing_distance/100)
-                        if new_sl > pos.stop_loss: pos.stop_loss = new_sl
+                    new_sl = price * 0.996
+                    if new_sl > pos.stop_loss: pos.stop_loss = new_sl
                 else:
-                    if curr_p < pos.min_p:
-                        pos.min_p = curr_p
-                        new_sl = curr_p * (1 + self.trailing_distance/100)
-                        if new_sl < pos.stop_loss: pos.stop_loss = new_sl
+                    new_sl = price * 1.004
+                    if new_sl < pos.stop_loss: pos.stop_loss = new_sl
 
-            is_exit = (pos.side == 'LONG' and curr_p <= pos.stop_loss) or (pos.side == 'SHORT' and curr_p >= pos.stop_loss)
+            # Умова виходу
+            exit_long = pos.side == 'LONG' and price <= pos.stop_loss
+            exit_short = pos.side == 'SHORT' and price >= pos.stop_loss
             
-            if is_exit:
-                final_pnl = pnl - 0.12 # Комісія
-                reason = "TRAILING" if pos.trailing_active else "STOP_LOSS"
-                db.save_trade(symbol, pos.side, final_pnl, reason)
+            if exit_long or exit_short:
+                db.save_trade(symbol, pos.strategy, pos.side, pnl - 0.12)
                 self.positions.pop(symbol)
-                bot.send_message(config.CHAT_ID, f"{'🟢' if final_pnl > 0 else '🔴'} *ЗАКРИТО ({reason})*\n#{symbol} | PnL: `{final_pnl:+.2f}%`")
+                bot.send_message(config.CHAT_ID, f"🏁 *ЗАКРИТО ({pos.strategy})*\n#{symbol} | PnL: `{pnl-0.12:+.2f}%`")
 
     def init_handlers(self):
         @bot.message_handler(commands=['status'])
         def status_cmd(m):
-            if not self.positions: return bot.reply_to(m, "Угод немає. Моніторю ринок...")
-            msg = "📊 *АКТИВНІ УГОДИ:*\n"
+            if not self.positions: return bot.reply_to(m, "Угод немає.")
+            msg = "📊 *ПОТОЧНІ УГОДИ:*\n"
             for s, p in self.positions.items():
-                df = self.get_data(s); curr_p = df.iloc[-1]['close'] if df is not None else p.entry_price
-                pnl = ((curr_p - p.entry_price) / p.entry_price * 100) if p.side == 'LONG' else ((p.entry_price - curr_p) / p.entry_price * 100)
-                msg += f"\n{'🟢' if pnl>0 else '🔴'} *#{s}*: `{pnl:+.2f}%` (Trail: {'✅' if p.trailing_active else '❌'})"
+                msg += f"\n#{s} | *{p.strategy}* | `{p.side}`"
             bot.send_message(m.chat.id, msg, parse_mode='Markdown')
 
         @bot.message_handler(commands=['report'])
         def report_cmd(m):
-            daily = db.get_daily_report(); hourly = db.get_hourly_report()
-            msg = "📅 *ПРИБУТОК:*\n" + "\n".join([f"• {d}: `{p:+.2f}%`" for d, p in daily])
-            msg += "\n\n⏰ *ГОДИНИ (UTC):*\n" + "\n".join([f"• {h}h: `{p:+.2f}%` ({c} у)" for h, p, c in hourly])
+            stats = db.get_report()
+            msg = "📈 *АНАЛІТИКА СТРАТЕГІЙ:*\n"
+            for strat, pnl, count in stats:
+                msg += f"\n• *{strat}*: `{pnl:+.2f}%` ({count} угод)"
             bot.send_message(m.chat.id, msg, parse_mode='Markdown')
 
-        @bot.message_handler(commands=['check'])
-        def check_cmd(m):
-            bot.send_message(m.chat.id, f"📡 *STATUS:* ACTIVE\nТаймфрейм: `5min`\nАктивних монет: `{len(SYMBOLS)}`")
-
     def run(self):
-        while self.running:
+        while True:
             try:
-                self.monitor_positions(); self.check_signals()
-                time.sleep(10)
-            except Exception as e:
-                print(f"Loop Error: {e}")
-                time.sleep(10)
+                self.monitor_positions()
+                self.check_signals()
+                time.sleep(15)
+            except: time.sleep(15)
 
 if __name__ == '__main__':
-    print("🚀 Sniper V2.1 Light запущен...")
-    bot_instance = ScalperBot(); bot.infinity_polling()
+    print("🚀 Sniper V4.0 Multi-Strategy запущен...")
+    MultiStrategyBot()
+    bot.infinity_polling()

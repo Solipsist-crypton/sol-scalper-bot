@@ -10,7 +10,7 @@ from datetime import datetime
 import config
 import sqlite3
 
-# ===== DATABASE: Сумарна аналітика по входу =====
+# ===== DATABASE: Аналітика по входу =====
 class StatsDB:
     def __init__(self):
         self.conn = sqlite3.connect("trading_pro.db", check_same_thread=False)
@@ -41,13 +41,10 @@ class StatsDB:
     def get_detailed_analysis(self):
         df = pd.read_sql_query("SELECT * FROM trades", self.conn)
         if df.empty: return None
-        
         df['entry_time'] = pd.to_datetime(df['entry_time'])
         df['hour_entry'] = df['entry_time'].dt.hour
-        
         wins = df[df['pnl_percent'] > 0]
         losses = df[df['pnl_percent'] <= 0]
-        
         return {
             'total_trades': len(df),
             'wins': len(wins),
@@ -58,7 +55,7 @@ class StatsDB:
             'best_trade': df['pnl_percent'].max(),
             'worst_trade': df['pnl_percent'].min(),
             'avg_hold': df['duration'].mean(),
-            'by_hour': df.groupby('hour_entry')['pnl_percent'].agg(['sum', 'count']) # СУМА ПО ВХОДУ
+            'by_hour': df.groupby('hour_entry')['pnl_percent'].agg(['sum', 'count'])
         }
 
 db = StatsDB()
@@ -67,7 +64,13 @@ db = StatsDB()
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
 client = Market(key=config.EXCHANGE_API_KEY, secret=config.EXCHANGE_API_SECRET, passphrase=config.EXCHANGE_API_PASSPHRASE)
 
-SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'LINKUSDT', 'ADAUSDT', 'NEARUSDT', 'BCHUSDT', 'LTCUSDT', 'XRPUSDT', 'APTUSDT', 'TIAUSDT']
+# Рівно 20 найбільш волатильних та ліквідних монет
+SYMBOLS = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'LINKUSDT', 
+    'ADAUSDT', 'NEARUSDT', 'BCHUSDT', 'LTCUSDT', 'XRPUSDT', 
+    'APTUSDT', 'TIAUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 
+    'DOTUSDT', 'INJUSDT', 'FETUSDT', 'MATICUSDT', 'STXUSDT'
+]
 
 class Position:
     def __init__(self, symbol, strategy, side, price, sl):
@@ -86,7 +89,7 @@ class ProSniperV5_1:
             bot.set_my_commands([
                 types.BotCommand("status", "📊 Поточні позиції"),
                 types.BotCommand("stats", "📈 Загальна статистика"),
-                types.BotCommand("report", "📅 Сумарний профіт по годинах"),
+                types.BotCommand("report", "📅 Профіт по годинах входу"),
                 types.BotCommand("history", "📜 Останні 10 угод"),
                 types.BotCommand("check", "📡 Стан бота")
             ])
@@ -96,17 +99,15 @@ class ProSniperV5_1:
         threading.Thread(target=self.run, daemon=True).start()
 
     def get_indicators(self, df):
-        # ADX розрахунок
+        # Розрахунок ADX (сила тренду)
         plus_dm = df['high'].diff()
         minus_dm = df['low'].diff()
         plus_dm[plus_dm < 0] = 0
         minus_dm[minus_dm > 0] = 0
-        
         tr = pd.concat([df['high'] - df['low'], 
                         abs(df['high'] - df['close'].shift()), 
                         abs(df['low'] - df['close'].shift())], axis=1).max(axis=1)
         atr = tr.rolling(14).mean()
-        
         plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
         minus_di = 100 * (abs(minus_dm).ewm(alpha=1/14).mean() / atr)
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
@@ -128,13 +129,11 @@ class ProSniperV5_1:
             if symbol in self.positions: continue
             df = self.get_data(symbol)
             if df is None or len(df) < 60: continue
-            
             curr = df.iloc[-1]
             adx_val = self.get_indicators(df)
             
-            # Фільтри: Об'єм 1.5x ТА ADX > 22 (ознака початку тренду)
             vol_ok = curr['vol'] > curr['avg_vol'] * 1.5
-            trend_ok = adx_val > 22 
+            trend_ok = adx_val > 22 # Фільтр ADX
             
             if trend_ok and vol_ok:
                 if curr['close'] > curr['high_50']:
@@ -152,10 +151,8 @@ class ProSniperV5_1:
             pos = self.positions[symbol]
             df = self.get_data(symbol); curr_p = df.iloc[-1]['close'] if df is not None else pos.entry_price
             pnl = ((curr_p - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else ((pos.entry_price - curr_p) / pos.entry_price * 100)
-            
             if pnl > pos.max_pnl_reached: pos.max_pnl_reached = pnl
             if pnl >= 0.6: pos.trailing_active = True
-            
             if pos.trailing_active:
                 if pos.side == 'LONG':
                     new_sl = curr_p * 0.996
@@ -163,16 +160,11 @@ class ProSniperV5_1:
                 else:
                     new_sl = curr_p * 1.004
                     if new_sl < pos.stop_loss: pos.stop_loss = new_sl
-
             if (pos.side == 'LONG' and curr_p <= pos.stop_loss) or (pos.side == 'SHORT' and curr_p >= pos.stop_loss):
-                exit_time = datetime.now()
-                t_data = {'symbol': symbol, 'strategy': pos.strategy, 'side': pos.side, 'entry_price': pos.entry_price, 'exit_price': curr_p, 'pnl': pnl, 'max_reached': pos.max_pnl_reached, 'entry_time': pos.entry_time, 'exit_time': exit_time, 'reason': 'trailing' if pos.trailing_active else 'stop_loss'}
+                t_data = {'symbol': symbol, 'strategy': pos.strategy, 'side': pos.side, 'entry_price': pos.entry_price, 'exit_price': curr_p, 'pnl': pnl, 'max_reached': pos.max_pnl_reached, 'entry_time': pos.entry_time, 'exit_time': datetime.now(), 'reason': 'trailing' if pos.trailing_active else 'stop_loss'}
                 db.save_trade(t_data); self.positions.pop(symbol)
-                
                 emoji = '✅' if pnl > 0 else '❌'
-                msg = (f"{emoji} *УГОДА ЗАКРИТА*\nМонета: #{symbol}\n📊 PnL: `{pnl:+.2f}%` (чистий: `{pnl-self.commission:+.2f}%`)\n"
-                       f"📈 Макс: `+{pos.max_pnl_reached:.2f}%` | ⏱ `{int((exit_time-pos.entry_time).total_seconds()/60)} хв`")
-                bot.send_message(config.CHAT_ID, msg, parse_mode='Markdown')
+                bot.send_message(config.CHAT_ID, f"{emoji} *УГОДА ЗАКРИТА*\n#{symbol} | PnL: `{pnl:+.2f}%` (чистий: `{pnl-self.commission:+.2f}%`)\n📈 Макс: `+{pos.max_pnl_reached:.2f}%`", parse_mode='Markdown')
 
     def init_handlers(self):
         @bot.message_handler(commands=['status'])
@@ -189,14 +181,14 @@ class ProSniperV5_1:
         def stats_cmd(m):
             a = db.get_detailed_analysis()
             if not a: return bot.reply_to(m, "Статистика порожня.")
-            msg = (f"📊 *ЗАГАЛЬНА СТАТИСТИКА*\n\n📈 Угод: {a['total_trades']}\n✅ Вінрейт: {a['winrate']:.1f}%\n💰 Заг. PnL: {a['total_pnl']:+.2f}%\n🏆 Краща: {a['best_trade']:+.2f}%\n⏱ Сер. час: {a['avg_hold']:.1f} хв")
+            msg = (f"📊 *СТАТИСТИКА*\n\n📈 Угод: {a['total_trades']}\n✅ Вінрейт: {a['winrate']:.1f}%\n💰 Заг. PnL: {a['total_pnl']:+.2f}%\n🏆 Краща: {a['best_trade']:+.2f}%")
             bot.send_message(m.chat.id, msg, parse_mode='Markdown')
 
         @bot.message_handler(commands=['report'])
         def report_cmd(m):
             a = db.get_detailed_analysis()
-            if not a: return bot.reply_to(m, "Даних для звіту немає.")
-            msg = "📅 *ПРИБУТОК ПО ГОДИНАХ ВХОДУ (СУМА):*\n"
+            if not a: return bot.reply_to(m, "Даних немає.")
+            msg = "📅 *СУМАРНИЙ ПРИБУТОК ПО ГОДИНАХ ВХОДУ:*\n\n"
             for hr, row in a['by_hour'].iterrows():
                 icon = "➕" if row['sum'] > 0 else "➖"
                 msg += f"{icon} {hr:02d}:00 | *{row['sum']:+.2f}%* | `{int(row['count'])} угод`\n"
@@ -208,7 +200,7 @@ class ProSniperV5_1:
             if df.empty: return bot.reply_to(m, "Історія порожня.")
             msg = "📜 *ОСТАННІ 10 УГОД:*\n"
             for _, t in df.iterrows():
-                msg += f"\n{'✅' if t['pnl_percent']>0 else '❌'} {t['symbol']} | {t['pnl_percent']:+.2f}% | {t['exit_reason']}"
+                msg += f"\n{'✅' if t['pnl_percent']>0 else '❌'} {t['symbol']} | {t['pnl_percent']:+.2f}%"
             bot.send_message(m.chat.id, msg, parse_mode='Markdown')
 
         @bot.message_handler(commands=['check'])

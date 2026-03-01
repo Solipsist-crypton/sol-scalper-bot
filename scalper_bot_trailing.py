@@ -10,7 +10,7 @@ from datetime import datetime
 import config
 import sqlite3
 
-# ===== DATABASE: Аналітика по входу =====
+# ===== DATABASE: Розширена аналітика =====
 class StatsDB:
     def __init__(self):
         self.conn = sqlite3.connect("trading_pro.db", check_same_thread=False)
@@ -41,21 +41,26 @@ class StatsDB:
     def get_detailed_analysis(self):
         df = pd.read_sql_query("SELECT * FROM trades", self.conn)
         if df.empty: return None
+        
         df['entry_time'] = pd.to_datetime(df['entry_time'])
-        df['hour_entry'] = df['entry_time'].dt.hour
+        df['hour'] = df['entry_time'].dt.hour
+        # 0-4 - Будні, 5-6 - Вихідні
+        df['day_type'] = df['entry_time'].dt.weekday.map(lambda x: 'Будні' if x < 5 else 'Вихідні')
+        
         wins = df[df['pnl_percent'] > 0]
-        losses = df[df['pnl_percent'] <= 0]
+        
+        # Групування для порівняльного звіту
+        by_day_type = df.groupby('day_type')['pnl_percent'].agg(['sum', 'count'])
+        by_hour_day = df.groupby(['hour', 'day_type'])['pnl_percent'].sum().unstack(fill_value=0)
+        
         return {
             'total_trades': len(df),
-            'wins': len(wins),
-            'losses': len(losses),
-            'winrate': (len(wins) / len(df)) * 100 if len(df) > 0 else 0,
+            'winrate': (len(wins) / len(df)) * 100,
             'total_pnl': df['pnl_percent'].sum(),
-            'avg_pnl': df['pnl_percent'].mean(),
             'best_trade': df['pnl_percent'].max(),
-            'worst_trade': df['pnl_percent'].min(),
             'avg_hold': df['duration'].mean(),
-            'by_hour': df.groupby('hour_entry')['pnl_percent'].agg(['sum', 'count'])
+            'by_day_type': by_day_type,
+            'by_hour_day': by_hour_day
         }
 
 db = StatsDB()
@@ -64,7 +69,6 @@ db = StatsDB()
 bot = telebot.TeleBot(config.TELEGRAM_TOKEN)
 client = Market(key=config.EXCHANGE_API_KEY, secret=config.EXCHANGE_API_SECRET, passphrase=config.EXCHANGE_API_PASSPHRASE)
 
-# Рівно 20 найбільш волатильних та ліквідних монет
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'AVAXUSDT', 'LINKUSDT', 
     'ADAUSDT', 'NEARUSDT', 'BCHUSDT', 'LTCUSDT', 'XRPUSDT', 
@@ -80,7 +84,7 @@ class Position:
         self.max_pnl_reached = 0.0
         self.trailing_active = False
 
-class ProSniperV5_1:
+class ProSniperV5_2:
     def __init__(self):
         self.positions = {}
         self.commission = 0.12
@@ -89,7 +93,8 @@ class ProSniperV5_1:
             bot.set_my_commands([
                 types.BotCommand("status", "📊 Поточні позиції"),
                 types.BotCommand("stats", "📈 Загальна статистика"),
-                types.BotCommand("report", "📅 Профіт по годинах входу"),
+                types.BotCommand("report", "💼 Будні vs Вихідні"),
+                types.BotCommand("days", "📅 Профіт по днях тижня"),
                 types.BotCommand("history", "📜 Останні 10 угод"),
                 types.BotCommand("check", "📡 Стан бота")
             ])
@@ -99,7 +104,6 @@ class ProSniperV5_1:
         threading.Thread(target=self.run, daemon=True).start()
 
     def get_indicators(self, df):
-        # Розрахунок ADX (сила тренду)
         plus_dm = df['high'].diff()
         minus_dm = df['low'].diff()
         plus_dm[plus_dm < 0] = 0
@@ -133,7 +137,7 @@ class ProSniperV5_1:
             adx_val = self.get_indicators(df)
             
             vol_ok = curr['vol'] > curr['avg_vol'] * 1.5
-            trend_ok = adx_val > 22 # Фільтр ADX
+            trend_ok = adx_val > 22 
             
             if trend_ok and vol_ok:
                 if curr['close'] > curr['high_50']:
@@ -153,6 +157,7 @@ class ProSniperV5_1:
             pnl = ((curr_p - pos.entry_price) / pos.entry_price * 100) if pos.side == 'LONG' else ((pos.entry_price - curr_p) / pos.entry_price * 100)
             if pnl > pos.max_pnl_reached: pos.max_pnl_reached = pnl
             if pnl >= 0.6: pos.trailing_active = True
+            
             if pos.trailing_active:
                 if pos.side == 'LONG':
                     new_sl = curr_p * 0.996
@@ -160,6 +165,7 @@ class ProSniperV5_1:
                 else:
                     new_sl = curr_p * 1.004
                     if new_sl < pos.stop_loss: pos.stop_loss = new_sl
+
             if (pos.side == 'LONG' and curr_p <= pos.stop_loss) or (pos.side == 'SHORT' and curr_p >= pos.stop_loss):
                 t_data = {'symbol': symbol, 'strategy': pos.strategy, 'side': pos.side, 'entry_price': pos.entry_price, 'exit_price': curr_p, 'pnl': pnl, 'max_reached': pos.max_pnl_reached, 'entry_time': pos.entry_time, 'exit_time': datetime.now(), 'reason': 'trailing' if pos.trailing_active else 'stop_loss'}
                 db.save_trade(t_data); self.positions.pop(symbol)
@@ -181,17 +187,41 @@ class ProSniperV5_1:
         def stats_cmd(m):
             a = db.get_detailed_analysis()
             if not a: return bot.reply_to(m, "Статистика порожня.")
-            msg = (f"📊 *СТАТИСТИКА*\n\n📈 Угод: {a['total_trades']}\n✅ Вінрейт: {a['winrate']:.1f}%\n💰 Заг. PnL: {a['total_pnl']:+.2f}%\n🏆 Краща: {a['best_trade']:+.2f}%")
+            msg = (f"📊 *ЗАГАЛЬНА СТАТИСТИКА*\n\n📈 Угод: {a['total_trades']}\n✅ Вінрейт: {a['winrate']:.1f}%\n💰 Заг. PnL: {a['total_pnl']:+.2f}%\n🏆 Краща: {a['best_trade']:+.2f}%\n⏱ Сер. час: {a['avg_hold']:.1f} хв")
             bot.send_message(m.chat.id, msg, parse_mode='Markdown')
 
         @bot.message_handler(commands=['report'])
         def report_cmd(m):
             a = db.get_detailed_analysis()
             if not a: return bot.reply_to(m, "Даних немає.")
-            msg = "📅 *СУМАРНИЙ ПРИБУТОК ПО ГОДИНАХ ВХОДУ:*\n\n"
-            for hr, row in a['by_hour'].iterrows():
-                icon = "➕" if row['sum'] > 0 else "➖"
-                msg += f"{icon} {hr:02d}:00 | *{row['sum']:+.2f}%* | `{int(row['count'])} угод`\n"
+            msg = "📊 *ПОРІВНЯЛЬНИЙ АНАЛІЗ (СУМА):*\n\n"
+            for d_type, row in a['by_day_type'].iterrows():
+                icon = "💼" if d_type == 'Будні' else "🏖"
+                msg += f"{icon} *{d_type}:* `{row['sum']:+.2f}%` ({int(row['count'])} угод)\n"
+            
+            msg += "\n🕒 *ГОДИНИ (БУДНІ | ВИХІДНІ):*\n"
+            for hr in range(24):
+                if hr in a['by_hour_day'].index:
+                    wkd = a['by_hour_day'].loc[hr, 'Будні'] if 'Будні' in a['by_hour_day'].columns else 0
+                    wke = a['by_hour_day'].loc[hr, 'Вихідні'] if 'Вихідні' in a['by_hour_day'].columns else 0
+                    if abs(wkd) > 0.01 or abs(wke) > 0.01:
+                        msg += f"{hr:02d}:00 | `{wkd:+.1f}%` | `{wke:+.1f}%` \n"
+            bot.send_message(m.chat.id, msg, parse_mode='Markdown')
+
+        @bot.message_handler(commands=['days'])
+        def days_cmd(m):
+            df = pd.read_sql_query("SELECT * FROM trades", db.conn)
+            if df.empty: return bot.reply_to(m, "Даних немає.")
+            df['entry_time'] = pd.to_datetime(df['entry_time'])
+            df['day_name'] = df['entry_time'].dt.day_name()
+            day_stats = df.groupby('day_name')['pnl_percent'].sum().reindex(
+                ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            )
+            msg = "📅 *ПРИБУТОК ПО ДНЯХ ТИЖНЯ:*\n\n"
+            ua = {"Monday":"Пн", "Tuesday":"Вт", "Wednesday":"Ср", "Thursday":"Чт", "Friday":"Пт", "Saturday":"Сб", "Sunday":"Нд"}
+            for eng, ukr in ua.items():
+                val = day_stats[eng] if not pd.isna(day_stats[eng]) else 0
+                msg += f"{'🟢' if val >= 0 else '🔴'} {ukr}: `{val:+.2f}%` \n"
             bot.send_message(m.chat.id, msg, parse_mode='Markdown')
 
         @bot.message_handler(commands=['history'])
@@ -213,4 +243,4 @@ class ProSniperV5_1:
             except: time.sleep(15)
 
 if __name__ == '__main__':
-    ProSniperV5_1(); bot.infinity_polling()
+    ProSniperV5_2(); bot.infinity_polling()
